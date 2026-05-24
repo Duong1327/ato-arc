@@ -1,0 +1,34 @@
+{
+  "name": "ato-autonomous-treasury-orchestrator",
+  "version": "1.0.0",
+  "description": "AI-Native CFO & Multi-Agent Capital Allocation Operating System on Circle's Arc L1 Network.",
+  "main": "scripts/agentController.ts",
+  "scripts": {
+    "compile": "npx hardhat compile",
+    "deploy": "ts-node scripts/deploy.ts",
+    "agent": "ts-node scripts/agentController.ts",
+    "test": "npx hardhat test"
+  },
+  "keywords": [
+    "Circle",
+    "Arc-Network",
+    "USDC-Gas",
+    "AI-Agent",
+    "Treasury-Management",
+    "Multi-Sig",
+    "Developer-Controlled-Wallets"
+  ],
+  "author": "Autonomous Treasury Orchestrator Team",
+  "license": "MIT",
+  "dependencies": {
+    "@circle-fin/developer-controlled-wallets": "^1.2.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.12.1"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
