@@ -7,9 +7,45 @@
 [![Web3 Stack: Wagmi + RainbowKit](https://img.shields.io/badge/Web3Stack-Wagmi%20%2B%20RainbowKit-FF4A5A?style=flat-square)](https://wagmi.sh)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](https://opensource.org/licenses/MIT)
 
+---
+
+### 🎥 [CLICK HERE TO WATCH THE VIDEO DEMO ON GOOGLE DRIVE!](https://drive.google.com/file/d/1HaSJq5NVtEET7uDHvqRKTsJMgw1ujEJl/view?usp=sharing)
+
+---
+
 **Autonomous Treasury Orchestrator (ATO)** is an enterprise-grade, AI-native CFO and Multi-Agent Capital Allocation Operating System running natively on **Circle's Arc L1 Network** (where USDC is the native gas token). 
 
 ATO bridges the massive gap between traditional corporate ERP accounting systems and decentralized ledger operations. By coordinating specialized **cognitive AI agents** with **Circle's Developer-Controlled Programmable Wallets** and highly secure **on-chain escrow vaults**, ATO automates complex corporate financial workflows—including payroll disbursements, milestone-based supplier payments, cross-chain yield sweeping, and multi-signature corporate overrides—with sub-second finality and zero end-user gas friction.
+
+---
+
+## 🖼️ Premium Executive Dashboard & UI Gallery
+
+Below are real screenshots of the **ATO Executive Dashboard** showing the beautiful glassmorphism dark-theme layout, real-time agent logs, CCTP sweepers, and compliance registries:
+
+### 1. Unified Dashboard Overview
+![ATO Overview Dashboard](docs/Overview.png)
+*The centralized command center displaying total consolidated balances, real-time operations gas reserve, active milestone counts, and live agent log monitor.*
+
+### 2. Cross-Chain CCTP Sweeper Widget
+![Move Fund Here](docs/Move%20fund%20here.png)
+*The plug-and-play cross-chain portal that lets you sweep USDC from Base Sepolia directly into the corporate Arc L1 treasury vault using Circle's CCTP.*
+
+### 3. Corporate Project Budgets & Milestones
+![Project Budgets](docs/Project%20Budgets.png)
+*Enforces strict milestone spending budgets and deadlines, allowing agents to dispatch funds only under strict owner-defined caps.*
+
+### 4. Safety & Trust Compliance Panel
+![Safety and trust](docs/Safety%20and%20trust.png)
+*Pre-flight compliance screener showing dynamic wallet blocklisting registries to proactively protect enterprise assets from freezing risk.*
+
+### 5. Multi-Sig Owner Override Center
+![Team Approvals](docs/Team%20Approvals.png)
+*The decentralized multi-signature approval center where directors must sign off on outlays exceeding standard agent limits.*
+
+### 6. Interactive "How It Works" Flow
+![How It Works](docs/How%20It%20Works.png)
+*Interactive visual guide mapping out the continuous three-agent loop execution from invoice ingestion to L1 settlement.*
 
 ---
 
