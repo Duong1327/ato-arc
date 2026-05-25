@@ -316,6 +316,82 @@ CIRCLE_WALLET_ID=your_developer_controlled_wallet_uuid
 VAULT_CONTRACT_ADDRESS=your_deployed_vault_contract_address
 ```
 
+### 3.5. Initializing Circle Developer-Controlled Wallets
+
+Use our helper script `scripts/circleWallets.ts` to quickly query, create wallet sets, and generate new developer-controlled wallets on Circle's platform:
+
+1. **List Existing Wallet Sets & Wallets:**
+   ```bash
+   npx ts-node scripts/circleWallets.ts list
+   ```
+   *Console Output:*
+   ```text
+   Listing Wallet Sets...
+   =================== WALLET SETS ===================
+   {
+     "walletSets": []
+   }
+
+   Listing Wallets...
+   ===================== WALLETS =====================
+   {
+     "wallets": []
+   }
+   ===================================================
+   ```
+
+2. **Create a New Wallet Set:**
+   ```bash
+   npx ts-node scripts/circleWallets.ts create-set
+   ```
+   *Console Output:*
+   ```text
+   Creating Wallet Set with name: "ATO Wallet Set"...
+   =================== WALLET SET CREATED ===================
+   {
+     "walletSet": {
+       "id": "3b3664e2-ea95-5072-b6e5-a06d3bfe2d95", 
+       "custodyType": "DEVELOPER",
+       "name": "ATO Wallet Set",
+       "updateDate": "2026-05-25T04:28:29Z",
+       "createDate": "2026-05-25T04:28:29Z"
+     }
+   }
+   =========================================================    
+
+   Next, you can create a wallet in this set using:
+   npx ts-node scripts/circleWallets.ts create-wallet 3b3664e2-ea95-5072-b6e5-a06d3bfe2d95
+   ```
+
+3. **Generate a Developer-Controlled Wallet:**
+   ```bash
+   npx ts-node scripts/circleWallets.ts create-wallet 3b3664e2-ea95-5072-b6e5-a06d3bfe2d95
+   ```
+   *Console Output:*
+   ```text
+   Creating Developer-Controlled Wallet in set 3b3664e2-ea95-5072-b6e5-a06d3bfe2d95...
+   =================== WALLET CREATED ===================       
+   {
+     "wallets": [
+       {
+         "id": "52c76c04-251f-5d24-8895-f05017b993b8",
+         "state": "LIVE",
+         "walletSetId": "3b3664e2-ea95-5072-b6e5-a06d3bfe2d95", 
+         "custodyType": "DEVELOPER",
+         "address": "0xa7952c334139e7f82a2a7dd499acee1547b78bd6",
+         "blockchain": "ETH-SEPOLIA",
+         "accountType": "EOA",
+         "updateDate": "2026-05-25T04:28:50Z",
+         "createDate": "2026-05-25T04:28:50Z"
+       }
+     ]
+   }
+   ======================================================       
+
+   Update your .env file with:
+   CIRCLE_WALLET_ID=52c76c04-251f-5d24-8895-f05017b993b8  
+   ```
+
 ### 4. Smart Contract Compilation & Deployment
 
 ```bash
