@@ -5,7 +5,7 @@ import App from './App.tsx'
 
 import '@rainbow-me/rainbowkit/styles.css';
 import { getDefaultConfig, RainbowKitProvider, darkTheme } from '@rainbow-me/rainbowkit';
-import { WagmiProvider } from 'wagmi';
+import { WagmiProvider, http } from 'wagmi';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { Chain } from 'viem';
 
@@ -27,6 +27,11 @@ const config = getDefaultConfig({
   appName: 'Autonomous Treasury Orchestrator',
   projectId: 'a872655bfbe30cf007d30d12e8424269', // standard dummy WalletConnect project ID for testnet
   chains: [arcTestnet, baseSepolia, arbitrumSepolia],
+  transports: {
+    [arcTestnet.id]: http('https://rpc.testnet.arc.network'),
+    [baseSepolia.id]: http('https://sepolia.base.org'),
+    [arbitrumSepolia.id]: http('https://sepolia-rollup.arbitrum.io/rpc'),
+  },
   ssr: false,
 });
 

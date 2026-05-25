@@ -196,17 +196,26 @@ class AgentAllocator {
             // Using Circle Developer-Controlled Wallets API to send contract execution payload.
             // Under the hood, Circle sponsors or executes gas via USDC gas allocations.
             // On Arc L1, the gas calculations automatically scale to 18 decimals internally.
-            const response = await circleClient.createContractCallTransaction({
+            const response = await circleClient.createContractExecutionTransaction({
                 walletId: this.walletId,
                 contractAddress: VAULT_CONTRACT_ADDRESS,
-                abi: VAULT_ABI,
-                functionName: invoice.type === 'milestone' ? 'agentExecuteMilestonePayout' : 'agentDirectPayoutERC20',
-                args: invoice.type === 'milestone' 
-                    ? [invoice.milestoneId, invoice.recipientAddress, amountERC20Units.toString()] 
+                abiFunctionSignature: invoice.type === 'milestone' 
+                    ? 'agentExecuteMilestonePayout(uint256,address,uint256)' 
+                    : 'agentDirectPayoutERC20(address,uint256)',
+                abiParameters: invoice.type === 'milestone' 
+                    ? [invoice.milestoneId!, invoice.recipientAddress, amountERC20Units.toString()] 
                     : [invoice.recipientAddress, amountERC20Units.toString()],
-                feeLevel: 'MEDIUM', // Managed fee execution on L1
+                fee: {
+                    type: 'level',
+                    config: {
+                        feeLevel: 'MEDIUM'
+                    }
+                }
             });
 
+            if (!response.data) {
+                throw new Error("Circle response returned empty data.");
+            }
             console.log(`[Agent Gamma] Circle DCW transaction successfully broadcasted!`);
             console.log(`  - Transaction ID: ${response.data.id}`);
             console.log(`  - Status: ${response.data.state}`);
@@ -267,6 +276,9 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
     // Step 3: Secure Asset Allocation & L1 Dispatch
     try {
         const txResult = await allocator.executeAutonomousTreasuryPayment(invoice);
+        if (!txResult) {
+            throw new Error("Transaction allocation returned empty result.");
+        }
         console.log(`===============================================================`);
         console.log(`[ATO Orchestrator] PIPELINE COMPLETED SUCCESSFULLY.`);
         console.log(`===============================================================\n`);

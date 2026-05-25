@@ -111,9 +111,8 @@ export default function App() {
   const { address: connectedAddress, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
 
-  // Load / Save Vault Address from localStorage
   const [vaultAddress, setVaultAddress] = useState<string>(() => {
-    return localStorage.getItem('ato_vault_address') || '';
+    return localStorage.getItem('ato_vault_address') || '0x0c392a7A89F26253ee17a650a107e123f0966125';
   });
   const [vaultAddressInput, setVaultAddressInput] = useState<string>('');
 
@@ -222,21 +221,30 @@ export default function App() {
 
   // Read Source Chain USDC balance for CCTP Sweeper
   const currentSourceConfig = CCTP_CONFIG[cctpSourceChainId];
-  const { data: sourceChainUsdcBalanceData, refetch: refetchSourceChainUsdcBalance } = useReadContract({
+  const { data: sourceChainUsdcBalanceData, refetch: refetchSourceChainUsdcBalance, error: sourceChainError } = useReadContract({
     address: currentSourceConfig.usdc,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
     args: connectedAddress ? [connectedAddress] : undefined,
+    chainId: cctpSourceChainId,
     query: {
-      enabled: isConnected && chainId === cctpSourceChainId
+      enabled: isConnected && !!connectedAddress
     }
   });
+
+  useEffect(() => {
+    if (sourceChainError) {
+      console.error("[CCTP Debug] Error reading source chain balance:", sourceChainError);
+      addLog('SYSTEM', `CCTP Balance Sync Warning: ${sourceChainError.message.slice(0, 100)}...`, 'WARNING');
+    }
+  }, [sourceChainError]);
 
   // --- READ DEPLOYED VAULT BALANCES ---
   const { data: vaultBalances, refetch: refetchVaultBalances } = useReadContract({
     address: vaultAddress as `0x${string}`,
     abi: ATO_VAULT_ABI,
     functionName: 'getTreasuryBalances',
+    chainId: 5042002,
     query: {
       enabled: isConnected && !!vaultAddress && isAddress(vaultAddress),
     }
@@ -247,6 +255,7 @@ export default function App() {
     address: vaultAddress as `0x${string}`,
     abi: ATO_VAULT_ABI,
     functionName: 'milestoneCount',
+    chainId: 5042002,
     query: {
       enabled: isConnected && !!vaultAddress && isAddress(vaultAddress),
     }
@@ -257,6 +266,7 @@ export default function App() {
     address: vaultAddress as `0x${string}`,
     abi: ATO_VAULT_ABI,
     functionName: 'proposalCount',
+    chainId: 5042002,
     query: {
       enabled: isConnected && !!vaultAddress && isAddress(vaultAddress),
     }
@@ -871,37 +881,37 @@ export default function App() {
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       
       {/* --- MOCK NAVBAR (HEX STYLE) --- */}
-      <div className="divider"></div>
-      <nav className="navbar">
-        
-        {/* Navigation links - Left */}
-        <div className="nav-links">
-          <span className="nav-link">Product</span>
-          <span className="nav-link">How It Works</span>
-          <span className="nav-link">For Teams</span>
-        </div>
-
-        {/* Central Logo */}
-        <div>
-          <div className="navbar-logo">ATO</div>
-        </div>
-
-        {/* Navigation links - Right */}
-        <div className="nav-links" style={{ gap: '1rem' }}>
-          <span className="nav-link">Help</span>
-          <ConnectButton showBalance={false} chainStatus="none" accountStatus="avatar" />
+      <header className="header-sticky">
+        <nav className="navbar">
           
-          <button 
-            onClick={() => setActiveTab('dashboard')} 
-            className="hex-blueprint-btn"
-            style={{ padding: '0.5rem 1rem', fontSize: '0.7rem', width: 'auto' }}
-          >
-            Go to Dashboard
-          </button>
-        </div>
+          {/* Navigation links - Left */}
+          <div className="nav-links">
+            <span className="nav-link">Product</span>
+            <span className="nav-link">How It Works</span>
+            <span className="nav-link">For Teams</span>
+          </div>
 
-      </nav>
-      <div className="divider-subtle"></div>
+          {/* Central Logo */}
+          <div>
+            <div className="navbar-logo">ATO</div>
+          </div>
+
+          {/* Navigation links - Right */}
+          <div className="nav-links" style={{ gap: '1rem' }}>
+            <span className="nav-link">Help</span>
+            <ConnectButton showBalance={false} chainStatus="none" accountStatus="avatar" />
+            
+            <button 
+              onClick={() => setActiveTab('dashboard')} 
+              className="hex-blueprint-btn"
+              style={{ padding: '0.5rem 1rem', fontSize: '0.7rem', width: 'auto' }}
+            >
+              Go to Dashboard
+            </button>
+          </div>
+
+        </nav>
+      </header>
 
       {/* --- PREMIUM HERO INTRO --- */}
       <section className="hero-section">
@@ -1546,7 +1556,7 @@ export default function App() {
                     <div style={{ padding: '0.5rem 0.75rem', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ color: 'var(--text-secondary)' }}>Your balance there:</span>
                       <strong style={{ color: '#fff', fontFamily: 'var(--font-mono)' }}>
-                        {isConnected && chainId === cctpSourceChainId && sourceChainUsdcBalanceData 
+                        {isConnected && sourceChainUsdcBalanceData 
                           ? (Number(sourceChainUsdcBalanceData) / 1e6).toLocaleString(undefined, { minimumFractionDigits: 2 })
                           : '0.00'}{' '}
                         USDC
