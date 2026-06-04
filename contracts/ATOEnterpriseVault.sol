@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "./interfaces/IComplianceOracle.sol";
+import "./interfaces/IERC8004Registry.sol";
+
 /**
  * @dev Standard interface for ERC20 USDC token.
  */
@@ -73,6 +76,11 @@ contract ATOEnterpriseVault {
     // Compliance Check (Simulated Pre-flight Static Check for Blocklisted Addresses)
     // In production, this can also query a Circle blocklist oracle or static contract call.
     mapping(address => bool) private _localBlocklist;
+    address public complianceOracleAddress;
+
+    // ERC-8004 AI Agent Registry & Cryptographic Identity variables
+    address public agentRegistryAddress;
+    mapping(address => uint256) public agentNonces;
 
     // --- EVENTS ---
     event AgentStatusUpdated(address indexed agent, bool indexed status);
@@ -91,6 +99,8 @@ contract ATOEnterpriseVault {
     event TreasuryFunded(address indexed sender, uint256 amountERC20, uint256 nativeValueReceived);
     event DirectTransferExecuted(address indexed agent, address indexed recipient, uint256 amountERC20);
     event ComplianceBlocklistUpdated(address indexed targetAddress, bool isBlocklisted);
+    event ComplianceOracleUpdated(address indexed oldOracle, address indexed newOracle);
+    event AgentRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     
     // --- CUSTOM ERRORS ---
     error NotAnOwner();
@@ -108,6 +118,7 @@ contract ATOEnterpriseVault {
     error InvalidAddress();
     error ExecutionFailed();
     error InvalidThreshold();
+    error InvalidSignature();
 
     // --- MODIFIERS ---
     modifier onlyOwner() {
@@ -116,13 +127,24 @@ contract ATOEnterpriseVault {
     }
 
     modifier onlyAgentOrOwner() {
-        if (!isAgent[msg.sender] && !isOwner[msg.sender]) revert NotAnAgentOrOwner();
+        bool verifiedAgent = false;
+        if (agentRegistryAddress != address(0)) {
+            verifiedAgent = IERC8004Registry(agentRegistryAddress).isAgentRegistered(msg.sender);
+        } else {
+            verifiedAgent = isAgent[msg.sender];
+        }
+        if (!verifiedAgent && !isOwner[msg.sender]) revert NotAnAgentOrOwner();
         _;
     }
 
     modifier complianceCheck(address target) {
         if (target == address(0)) revert InvalidAddress();
         if (_localBlocklist[target]) revert AddressIsBlocklisted();
+        if (complianceOracleAddress != address(0)) {
+            if (!IComplianceOracle(complianceOracleAddress).isAddressCompliant(target)) {
+                revert AddressIsBlocklisted();
+            }
+        }
         _;
     }
 
@@ -212,6 +234,22 @@ contract ATOEnterpriseVault {
         emit ComplianceBlocklistUpdated(target, isBlocklisted);
     }
 
+    /**
+     * @notice Allows owners to set the compliance oracle contract address.
+     */
+    function setComplianceOracleAddress(address newOracle) external onlyOwner {
+        emit ComplianceOracleUpdated(complianceOracleAddress, newOracle);
+        complianceOracleAddress = newOracle;
+    }
+
+    /**
+     * @notice Allows owners to set the Agent Registry contract address.
+     */
+    function setAgentRegistryAddress(address newRegistry) external onlyOwner {
+        emit AgentRegistryUpdated(agentRegistryAddress, newRegistry);
+        agentRegistryAddress = newRegistry;
+    }
+
     // --- MILESTONE TREASURY ALLOCATIONS ---
 
     /**
@@ -252,7 +290,9 @@ contract ATOEnterpriseVault {
      */
     function agentDirectPayoutERC20(
         address recipient, 
-        uint256 amountERC20
+        uint256 amountERC20,
+        uint256 nonce,
+        bytes calldata signature
     ) 
         external 
         onlyAgentOrOwner 
@@ -261,10 +301,30 @@ contract ATOEnterpriseVault {
     {
         if (amountERC20 > agentSingleTxLimitERC20) revert AgentLimitExceeded();
         
+        // Compute the cryptographic message hash matching off-chain signing
+        bytes32 messageHash = keccak256(abi.encodePacked(recipient, amountERC20, nonce, address(this), block.chainid));
+        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
+        address signer = recoverSigner(ethSignedMessageHash, signature);
+        
+        // Verify recovered signer is a registered agent (or owner)
+        bool verifiedAgent = false;
+        if (agentRegistryAddress != address(0)) {
+            verifiedAgent = IERC8004Registry(agentRegistryAddress).isAgentRegistered(signer);
+        } else {
+            verifiedAgent = isAgent[signer];
+        }
+        if (!verifiedAgent && !isOwner[signer]) revert InvalidSignature();
+        
+        // Nonce check to prevent replay attacks
+        if (nonce != agentNonces[signer]) revert InvalidSignature();
+        
+        // Increment nonce
+        agentNonces[signer]++;
+        
         IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
         if (usdc.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
 
-        emit DirectTransferExecuted(msg.sender, recipient, amountERC20);
+        emit DirectTransferExecuted(signer, recipient, amountERC20);
         
         bool success = usdc.transfer(recipient, amountERC20);
         if (!success) revert ExecutionFailed();
@@ -401,5 +461,21 @@ contract ATOEnterpriseVault {
      */
     function isAddressBlocklisted(address target) external view returns (bool) {
         return _localBlocklist[target];
+    }
+
+    /**
+     * @notice Cryptographic signature recovery helper.
+     */
+    function recoverSigner(bytes32 ethSignedMessageHash, bytes memory signature) public pure returns (address) {
+        if (signature.length != 65) return address(0);
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
+        }
+        return ecrecover(ethSignedMessageHash, v, r, s);
     }
 }
