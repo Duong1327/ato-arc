@@ -226,6 +226,20 @@ export const ATO_VAULT_ABI = [
     type: 'function'
   },
   {
+    inputs: [],
+    name: 'agentRegistryAddress',
+    outputs: [{ internalType: 'address', name: '', type: 'address' }],
+    stateMutability: 'view',
+    type: 'function'
+  },
+  {
+    inputs: [{ internalType: 'address', name: 'newRegistry', type: 'address' }],
+    name: 'setAgentRegistryAddress',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function'
+  },
+  {
     inputs: [
       { internalType: 'address', name: 'recipient', type: 'address' },
       { internalType: 'uint256', name: 'amountERC20', type: 'uint256' }
@@ -278,7 +292,9 @@ export const ATO_VAULT_ABI = [
     inputs: [
       { internalType: 'string', name: 'name', type: 'string' },
       { internalType: 'uint256', name: 'allocatedERC20', type: 'uint256' },
-      { internalType: 'uint256', name: 'duration', type: 'uint256' }
+      { internalType: 'uint256', name: 'duration', type: 'uint256' },
+      { internalType: 'address', name: 'provider', type: 'address' },
+      { internalType: 'address', name: 'evaluator', type: 'address' }
     ],
     name: 'createMilestone',
     outputs: [],
@@ -349,7 +365,10 @@ export const ATO_VAULT_ABI = [
       { internalType: 'uint256', name: 'spentERC20', type: 'uint256' },
       { internalType: 'uint256', name: 'timeDeadline', type: 'uint256' },
       { internalType: 'bool', name: 'isActive', type: 'bool' },
-      { internalType: 'bool', name: 'exists', type: 'bool' }
+      { internalType: 'bool', name: 'exists', type: 'bool' },
+      { internalType: 'address', name: 'jobContractAddress', type: 'address' },
+      { internalType: 'address', name: 'provider', type: 'address' },
+      { internalType: 'address', name: 'evaluator', type: 'address' }
     ],
     stateMutability: 'view',
     type: 'function'
@@ -698,6 +717,73 @@ export const ERC8004_REGISTRY_ABI = [
       }
     ],
     "name": "updateReputation",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+] as const;
+
+export const ERC8183_JOB_ABI = [
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "jobId", "type": "uint256" }
+    ],
+    "name": "jobs",
+    "outputs": [
+      { "internalType": "address", "name": "client", "type": "address" },
+      { "internalType": "address", "name": "provider", "type": "address" },
+      { "internalType": "address", "name": "evaluator", "type": "address" },
+      { "internalType": "address", "name": "token", "type": "address" },
+      { "internalType": "uint256", "name": "amount", "type": "uint256" },
+      { "internalType": "uint256", "name": "expiry", "type": "uint256" },
+      { "internalType": "uint8", "name": "status", "type": "uint8" },
+      { "internalType": "bytes32", "name": "deliverableHash", "type": "bytes32" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "jobId", "type": "uint256" },
+      { "internalType": "bytes32", "name": "proofHash", "type": "bytes32" }
+    ],
+    "name": "submit",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "jobId", "type": "uint256" }
+    ],
+    "name": "complete",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "jobId", "type": "uint256" }
+    ],
+    "name": "releaseFunds",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "jobId", "type": "uint256" }
+    ],
+    "name": "reject",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "jobId", "type": "uint256" }
+    ],
+    "name": "claimRefund",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

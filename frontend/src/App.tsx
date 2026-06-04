@@ -10,8 +10,8 @@ import {
   usePublicClient,
   useSwitchChain
 } from 'wagmi';
-import { parseUnits, formatUnits, isAddress } from 'viem';
-import { ATO_VAULT_ABI, ATO_VAULT_BYTECODE } from './contractBytecode';
+import { parseUnits, formatUnits, isAddress, keccak256, stringToHex } from 'viem';
+import { ATO_VAULT_ABI, ATO_VAULT_BYTECODE, ERC8183_JOB_ABI, ERC8004_REGISTRY_ABI } from './contractBytecode';
 
 // --- TS INTERFACES ---
 interface Milestone {
@@ -21,6 +21,11 @@ interface Milestone {
   spentERC20: number;
   timeDeadline: string;
   isActive: boolean;
+  jobContractAddress?: string;
+  provider?: string;
+  evaluator?: string;
+  jobStatus?: number;
+  jobDeliverableHash?: string;
 }
 
 interface Proposal {
@@ -240,6 +245,13 @@ export default function App() {
   const [newMilestoneName, setNewMilestoneName] = useState('');
   const [newMilestoneBudget, setNewMilestoneBudget] = useState('');
   const [newMilestoneDeadline, setNewMilestoneDeadline] = useState('');
+  const [newMilestoneProvider, setNewMilestoneProvider] = useState('');
+  const [newMilestoneEvaluator, setNewMilestoneEvaluator] = useState('');
+
+  // UI state for submitting deliverables to ERC-8183 Escrow
+  const [submittingDeliverableMilestoneId, setSubmittingDeliverableMilestoneId] = useState<number | null>(null);
+  const [deliverableProofText, setDeliverableProofText] = useState('');
+  const [submittingDeliverable, setSubmittingDeliverable] = useState(false);
 
   // UI state for creating a new multisig proposal
   const [newPropRecipient, setNewPropRecipient] = useState('');
@@ -457,38 +469,62 @@ export default function App() {
   }, [vaultBalances, vaultAddress]);
 
   // Load custom milestones dynamically from the blockchain if a vault is loaded!
-  useEffect(() => {
+  const fetchAllOnChainMilestones = async () => {
     if (!isConnected || !vaultAddress || !isAddress(vaultAddress) || !milestoneCountVal || !publicClient) return;
+    const count = Number(milestoneCountVal);
+    const list: Milestone[] = [];
+    addLog('SYSTEM', `Syncing ${count} milestones from custom vault ${vaultAddress}...`, 'INFO');
 
-    const fetchAllOnChainMilestones = async () => {
-      const count = Number(milestoneCountVal);
-      const list: Milestone[] = [];
-      addLog('SYSTEM', `Syncing ${count} milestones from custom vault ${vaultAddress}...`, 'INFO');
+    for (let i = 1; i <= count; i++) {
+      try {
+        const m = await publicClient.readContract({
+          address: vaultAddress as `0x${string}`,
+          abi: ATO_VAULT_ABI,
+          functionName: 'milestones',
+          args: [BigInt(i)]
+        }) as any;
 
-      for (let i = 1; i <= count; i++) {
-        try {
-          const m = await publicClient.readContract({
-            address: vaultAddress as `0x${string}`,
-            abi: ATO_VAULT_ABI,
-            functionName: 'milestones',
-            args: [BigInt(i)]
-          });
-          list.push({
-            id: i,
-            name: m[0],
-            allocatedERC20: Number(m[1]) / 1e6,
-            spentERC20: Number(m[2]) / 1e6,
-            timeDeadline: new Date(Number(m[3]) * 1000).toISOString().split('T')[0],
-            isActive: m[4]
-          });
-        } catch (err) {
-          console.error(`Error reading milestone ${i}:`, err);
+        let jobStatus = 1; // Default to FUNDED
+        let jobDeliverableHash = '0x0000000000000000000000000000000000000000000000000000000000000000';
+        const jobContractAddress = m[6];
+
+        if (jobContractAddress && jobContractAddress !== '0x0000000000000000000000000000000000000000') {
+          try {
+            const jobData = await publicClient.readContract({
+              address: jobContractAddress as `0x${string}`,
+              abi: ERC8183_JOB_ABI,
+              functionName: 'jobs',
+              args: [BigInt(1)]
+            }) as any;
+            jobStatus = Number(jobData[6]);
+            jobDeliverableHash = jobData[7];
+          } catch (jobErr) {
+            console.error(`Error reading job contract for milestone ${i}:`, jobErr);
+          }
         }
-      }
-      setMilestones(list);
-      addLog('SYSTEM', 'On-chain milestone allocations synchronized successfully.', 'SUCCESS');
-    };
 
+        list.push({
+          id: i,
+          name: m[0],
+          allocatedERC20: Number(m[1]) / 1e6,
+          spentERC20: Number(m[2]) / 1e6,
+          timeDeadline: new Date(Number(m[3]) * 1000).toISOString().split('T')[0],
+          isActive: m[4],
+          jobContractAddress: m[6],
+          provider: m[7],
+          evaluator: m[8],
+          jobStatus,
+          jobDeliverableHash
+        });
+      } catch (err) {
+        console.error(`Error reading milestone ${i}:`, err);
+      }
+    }
+    setMilestones(list);
+    addLog('SYSTEM', 'On-chain milestone allocations synchronized successfully.', 'SUCCESS');
+  };
+
+  useEffect(() => {
     fetchAllOnChainMilestones();
   }, [vaultAddress, milestoneCountVal, isConnected, publicClient]);
 
@@ -948,9 +984,12 @@ export default function App() {
     const budget = parseFloat(newMilestoneBudget);
     if (isNaN(budget) || budget <= 0) return;
 
+    const providerAddr = newMilestoneProvider || '0x1111111111111111111111111111111111111111';
+    const evaluatorAddr = newMilestoneEvaluator || '0x2222222222222222222222222222222222222222';
+
     if (vaultAddress && isAddress(vaultAddress)) {
       try {
-        addLog('SYSTEM', `Submitting new on-chain milestone: "${newMilestoneName}"...`, 'INFO');
+        addLog('SYSTEM', `Submitting new on-chain milestone with ERC-8183 Escrow...`, 'INFO');
         const budgetUnits = parseUnits(newMilestoneBudget, 6);
         const durationSec = BigInt(30 * 24 * 60 * 60); // standard 30-day duration
 
@@ -958,10 +997,16 @@ export default function App() {
           address: vaultAddress as `0x${string}`,
           abi: ATO_VAULT_ABI,
           functionName: 'createMilestone',
-          args: [newMilestoneName, budgetUnits, durationSec]
+          args: [
+            newMilestoneName, 
+            budgetUnits, 
+            durationSec, 
+            providerAddr as `0x${string}`, 
+            evaluatorAddr as `0x${string}`
+          ]
         });
 
-        addLog('SYSTEM', `Milestone creation broadcasted! Hash: ${tx}`, 'SUCCESS');
+        addLog('SYSTEM', `Milestone created and ERC-8183 escrow contract deployed! Hash: ${tx}`, 'SUCCESS');
         refetchMilestoneCount();
       } catch (err: any) {
         addLog('SYSTEM', `On-chain Milestone creation failed: ${err.message || err}`, 'ERROR');
@@ -974,7 +1019,12 @@ export default function App() {
         allocatedERC20: budget,
         spentERC20: 0,
         timeDeadline: newMilestoneDeadline,
-        isActive: true
+        isActive: true,
+        jobContractAddress: '0x3c847e090d1958b2a42e13cb81eb09f300000000',
+        provider: providerAddr,
+        evaluator: evaluatorAddr,
+        jobStatus: 1,
+        jobDeliverableHash: '0x0000000000000000000000000000000000000000000000000000000000000000'
       };
       setMilestones([...milestones, newM]);
       addLog('SYSTEM', `Created new Corporate Milestone: "${newMilestoneName}" with budget ${budget.toLocaleString()} USDC.`, 'SUCCESS');
@@ -984,6 +1034,119 @@ export default function App() {
     setNewMilestoneName('');
     setNewMilestoneBudget('');
     setNewMilestoneDeadline('');
+    setNewMilestoneProvider('');
+    setNewMilestoneEvaluator('');
+  };
+
+  const handleSubmitDeliverable = async (milestoneId: number, jobAddress: string) => {
+    if (!deliverableProofText) return;
+    try {
+      setSubmittingDeliverable(true);
+      addLog('SYSTEM', `Generating deliverable proof hash for Milestone #${milestoneId}...`, 'INFO');
+      const proofHash = keccak256(stringToHex(deliverableProofText));
+      
+      if (vaultAddress && isAddress(vaultAddress) && jobAddress && jobAddress !== '0x0000000000000000000000000000000000000000') {
+        addLog('SYSTEM', `Broadcasting deliverable submission on-chain for Milestone #${milestoneId}...`, 'INFO');
+        const tx = await writeContract({
+          address: jobAddress as `0x${string}`,
+          abi: ERC8183_JOB_ABI,
+          functionName: 'submit',
+          args: [BigInt(1), proofHash]
+        });
+        addLog('SYSTEM', `Deliverable submitted! Tx Hash: ${tx}`, 'SUCCESS');
+      } else {
+        // Sandbox mode update
+        setMilestones(prev => prev.map(m => {
+          if (m.id === milestoneId) {
+            return { ...m, jobStatus: 2, jobDeliverableHash: proofHash };
+          }
+          return m;
+        }));
+        addLog('SYSTEM', `Deliverable submitted for Milestone #${milestoneId} in Sandbox Mode.`, 'SUCCESS');
+      }
+      
+      setDeliverableProofText('');
+      setSubmittingDeliverableMilestoneId(null);
+      fetchAllOnChainMilestones();
+    } catch (err: any) {
+      addLog('SYSTEM', `Submission failed: ${err.message || err}`, 'ERROR');
+    } finally {
+      setSubmittingDeliverable(false);
+    }
+  };
+
+  const handleApproveEscrow = async (milestoneId: number, jobAddress: string) => {
+    try {
+      if (vaultAddress && isAddress(vaultAddress) && jobAddress && jobAddress !== '0x0000000000000000000000000000000000000000') {
+        addLog('SYSTEM', `Approving Job Escrow and releasing funds for Milestone #${milestoneId}...`, 'INFO');
+        const tx = await writeContract({
+          address: jobAddress as `0x${string}`,
+          abi: ERC8183_JOB_ABI,
+          functionName: 'complete',
+          args: [BigInt(1)]
+        });
+        addLog('SYSTEM', `Escrow completion approved! Tx Hash: ${tx}`, 'SUCCESS');
+      } else {
+        // Sandbox mode update
+        setMilestones(prev => prev.map(m => {
+          if (m.id === milestoneId) {
+            return { ...m, jobStatus: 3, spentERC20: m.allocatedERC20 };
+          }
+          return m;
+        }));
+        addLog('SYSTEM', `Escrow approved for Milestone #${milestoneId} in Sandbox Mode.`, 'SUCCESS');
+      }
+      fetchAllOnChainMilestones();
+    } catch (err: any) {
+      addLog('SYSTEM', `Escrow approval failed: ${err.message || err}`, 'ERROR');
+    }
+  };
+
+  const handleRejectEscrow = async (milestoneId: number, jobAddress: string) => {
+    try {
+      if (vaultAddress && isAddress(vaultAddress) && jobAddress && jobAddress !== '0x0000000000000000000000000000000000000000') {
+        addLog('SYSTEM', `Rejecting Job Escrow deliverables for Milestone #${milestoneId}...`, 'INFO');
+        const tx = await writeContract({
+          address: jobAddress as `0x${string}`,
+          abi: ERC8183_JOB_ABI,
+          functionName: 'reject',
+          args: [BigInt(1)]
+        });
+        addLog('SYSTEM', `Escrow rejected! Tx Hash: ${tx}`, 'SUCCESS');
+      } else {
+        // Sandbox mode update
+        setMilestones(prev => prev.map(m => {
+          if (m.id === milestoneId) {
+            return { ...m, jobStatus: 4 };
+          }
+          return m;
+        }));
+        addLog('SYSTEM', `Escrow rejected for Milestone #${milestoneId} in Sandbox Mode.`, 'SUCCESS');
+      }
+      fetchAllOnChainMilestones();
+    } catch (err: any) {
+      addLog('SYSTEM', `Escrow rejection failed: ${err.message || err}`, 'ERROR');
+    }
+  };
+
+  const handleClaimRefund = async (milestoneId: number, jobAddress: string) => {
+    try {
+      if (vaultAddress && isAddress(vaultAddress) && jobAddress && jobAddress !== '0x0000000000000000000000000000000000000000') {
+        addLog('SYSTEM', `Requesting refund for Milestone #${milestoneId} from rejected/expired job contract...`, 'INFO');
+        const tx = await writeContract({
+          address: jobAddress as `0x${string}`,
+          abi: ERC8183_JOB_ABI,
+          functionName: 'claimRefund',
+          args: [BigInt(1)]
+        });
+        addLog('SYSTEM', `Refund claimed successfully! Tx Hash: ${tx}`, 'SUCCESS');
+      } else {
+        addLog('SYSTEM', `Refund claimed for Milestone #${milestoneId} in Sandbox Mode.`, 'SUCCESS');
+      }
+      fetchAllOnChainMilestones();
+    } catch (err: any) {
+      addLog('SYSTEM', `Refund request failed: ${err.message || err}`, 'ERROR');
+    }
   };
 
   // --- MULTISIG CORE HANDLERS ---
@@ -2029,46 +2192,154 @@ export default function App() {
           )}
 
           {/* TAB 4: MILESTONES DASHBOARD */}
+          {/* TAB 4: JOB ESCROW CENTER */}
           {activeTab === 'milestones' && (
-            <div className="milestones-tab-grid">
+            <div className="milestones-tab-grid" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.5rem', alignItems: 'start' }}>
               
-              {/* Left Column: Milestones lists */}
-              <div className="milestones-list">
-                <div className="glass-panel" style={{ gap: '1.25rem' }}>
-                  <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>Project Budgets</h3>
+              {/* Left Column: Escrow list */}
+              <div className="milestones-list" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div className="glass-panel" style={{ gap: '1.25rem', padding: '1.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.9rem', color: '#fff' }}>ERC-8183 Job Escrow Center</h3>
+                      <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>All milestones deploy a native Arc escrow contract locking capital until deliverable verification.</p>
+                    </div>
+                    <span style={{ fontSize: '0.65rem', fontFamily: 'var(--font-mono)', color: 'var(--accent-pink)', border: '1px solid rgba(255,46,143,0.3)', padding: '0.2rem 0.5rem', borderRadius: '4px', background: 'rgba(255,46,143,0.05)' }}>
+                      Standard: ERC-8183
+                    </span>
+                  </div>
                   
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
                     {milestones.length === 0 ? (
-                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>No project budgets set up yet. Create one to start tracking spending by project.</p>
+                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'center', padding: '2rem 0' }}>No active job escrows found. Use the panel on the right to deploy one.</p>
                     ) : (
                       milestones.map(m => {
                         const percent = m.allocatedERC20 > 0 ? (m.spentERC20 / m.allocatedERC20) * 100 : 0;
+                        const statusColors = ['badge-orange', 'badge-pink', 'badge-orange', 'badge-green', 'badge-red'];
+                        const statusNames = ['OPEN', 'FUNDED (Escrow Locked)', 'SUBMITTED (Pending Audit)', 'COMPLETED (Paid)', 'REJECTED'];
+                        const jobStatusVal = m.jobStatus ?? 1;
+
                         return (
-                          <div key={m.id} className="milestone-item-card">
-                            <div className="milestone-item-row">
+                          <div key={m.id} className="milestone-item-card" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '8px', padding: '1.25rem' }}>
+                            <div className="milestone-item-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '0.75rem' }}>
                               <div>
-                                <h4 style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>{m.name}</h4>
-                                <p style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: '0.15rem' }}>
-                                  Deadline: {m.timeDeadline}
+                                <h4 style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#fff' }}>{m.name}</h4>
+                                <p style={{ fontSize: '0.62rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: '0.2rem' }}>
+                                  Expiry: {m.timeDeadline}
                                 </p>
                               </div>
-                              <span className={`badge ${m.isActive ? 'badge-pink' : 'badge-red'}`}>
-                                {m.isActive ? 'Active' : 'Expired'}
+                              <span className={`badge ${statusColors[jobStatusVal] || 'badge-pink'}`}>
+                                {statusNames[jobStatusVal] || 'ACTIVE'}
                               </span>
                             </div>
 
+                            {/* Job Contract Metadata */}
+                            {m.jobContractAddress && m.jobContractAddress !== '0x0000000000000000000000000000000000000000' && (
+                              <div style={{ background: 'rgba(0,0,0,0.2)', padding: '0.5rem 0.75rem', borderRadius: '4px', marginBottom: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.25rem', borderLeft: '3px solid var(--accent-pink)' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.62rem' }}>
+                                  <span style={{ color: 'var(--text-secondary)' }}>Escrow Address:</span>
+                                  <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-pink)' }}>{m.jobContractAddress.slice(0, 10)}...{m.jobContractAddress.slice(-8)}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.62rem' }}>
+                                  <span style={{ color: 'var(--text-secondary)' }}>Provider (Supplier):</span>
+                                  <span style={{ fontFamily: 'var(--font-mono)', color: '#fff' }}>{m.provider ? `${m.provider.slice(0, 10)}...${m.provider.slice(-8)}` : 'None'}</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.62rem' }}>
+                                  <span style={{ color: 'var(--text-secondary)' }}>Evaluator (Auditor):</span>
+                                  <span style={{ fontFamily: 'var(--font-mono)', color: '#fff' }}>{m.evaluator ? `${m.evaluator.slice(0, 10)}...${m.evaluator.slice(-8)}` : 'None'}</span>
+                                </div>
+                                {jobStatusVal === 2 && m.jobDeliverableHash && (
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.62rem', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '0.25rem', marginTop: '0.25rem' }}>
+                                    <span style={{ color: 'var(--text-secondary)' }}>Deliverable Hash:</span>
+                                    <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-orange)' }}>{m.jobDeliverableHash.slice(0, 16)}...</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
                             {/* Progress indicator */}
-                            <div className="milestone-progress-block">
-                              <div className="progress-labels">
-                                <span style={{ color: 'var(--text-secondary)' }}>Spent: ${m.spentERC20.toLocaleString()} USDC</span>
-                                <span style={{ color: 'var(--text-primary)' }}>Budget: ${m.allocatedERC20.toLocaleString()} USDC</span>
+                            <div className="milestone-progress-block" style={{ marginBottom: '0.75rem' }}>
+                              <div className="progress-labels" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', marginBottom: '0.25rem' }}>
+                                <span style={{ color: 'var(--text-secondary)' }}>Released: ${m.spentERC20.toLocaleString()} USDC</span>
+                                <span style={{ color: 'var(--text-primary)', fontWeight: 'bold' }}>Locked Escrow: ${m.allocatedERC20.toLocaleString()} USDC</span>
                               </div>
-                              <div className="progress-bar-bg">
-                                <div className="progress-bar-fill" style={{ width: `${percent}%` }}></div>
+                              <div className="progress-bar-bg" style={{ height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
+                                <div className="progress-bar-fill" style={{ height: '100%', width: `${percent}%`, background: 'var(--primary-gradient)', borderRadius: '3px' }}></div>
                               </div>
-                              <div className="progress-pct">
-                                {percent.toFixed(1)}% spent
-                              </div>
+                            </div>
+
+                            {/* Interactive Actions for Escrow Roles */}
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+                              {jobStatusVal === 1 && (
+                                <>
+                                  {submittingDeliverableMilestoneId !== m.id ? (
+                                    <button 
+                                      onClick={() => setSubmittingDeliverableMilestoneId(m.id)}
+                                      className="hex-blueprint-btn" 
+                                      style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'var(--primary-gradient)' }}
+                                    >
+                                      📤 Submit Deliverables
+                                    </button>
+                                  ) : (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%', background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                                      <input 
+                                        type="text" 
+                                        value={deliverableProofText}
+                                        onChange={e => setDeliverableProofText(e.target.value)}
+                                        placeholder="Enter work details, PR link, or IPFS URI"
+                                        className="form-input"
+                                        style={{ fontSize: '0.65rem', padding: '0.4rem' }}
+                                      />
+                                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                        <button 
+                                          onClick={() => handleSubmitDeliverable(m.id, m.jobContractAddress || '')}
+                                          disabled={submittingDeliverable}
+                                          className="hex-blueprint-btn" 
+                                          style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'var(--accent-pink)' }}
+                                        >
+                                          {submittingDeliverable ? 'Submitting...' : 'Confirm Submission'}
+                                        </button>
+                                        <button 
+                                          onClick={() => { setSubmittingDeliverableMilestoneId(null); setDeliverableProofText(''); }}
+                                          className="hex-blueprint-btn" 
+                                          style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'rgba(255,255,255,0.1)' }}
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+                                </>
+                              )}
+
+                              {jobStatusVal === 2 && (
+                                <>
+                                  <button 
+                                    onClick={() => handleApproveEscrow(m.id, m.jobContractAddress || '')}
+                                    className="hex-blueprint-btn" 
+                                    style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'green' }}
+                                  >
+                                    ✓ Approve & Release Payout
+                                  </button>
+                                  <button 
+                                    onClick={() => handleRejectEscrow(m.id, m.jobContractAddress || '')}
+                                    className="hex-blueprint-btn" 
+                                    style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'red' }}
+                                  >
+                                    ✗ Reject Deliverables
+                                  </button>
+                                </>
+                              )}
+
+                              {jobStatusVal === 4 && (
+                                <button 
+                                  onClick={() => handleClaimRefund(m.id, m.jobContractAddress || '')}
+                                  className="hex-blueprint-btn" 
+                                  style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'rgba(255,255,255,0.1)' }}
+                                >
+                                  ↺ Claim Escrow Refund
+                                </button>
+                              )}
                             </div>
                           </div>
                         );
@@ -2079,39 +2350,65 @@ export default function App() {
               </div>
 
               {/* Right Column: Creation form */}
-              <div className="glass-panel">
+              <div className="glass-panel" style={{ padding: '1.5rem' }}>
                 <div>
-                  <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>New Project Budget</h3>
-                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>Set a spending limit for a team or project.</p>
+                  <h3 className="metric-label" style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#fff', fontWeight: 'bold' }}>Deploy Escrow Agreement</h3>
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>Fund a new job escrow. Capital will be secured in a native on-chain state machine.</p>
                 </div>
 
-                <form onSubmit={handleCreateMilestone} className="form-container">
+                <form onSubmit={handleCreateMilestone} className="form-container" style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                   <div className="form-group">
-                    <label>Project Name</label>
+                    <label>Agreement / Job Name</label>
                     <input 
                       type="text" 
                       value={newMilestoneName}
                       onChange={e => setNewMilestoneName(e.target.value)}
-                      placeholder="e.g. Q4 Marketing Campaign"
+                      placeholder="e.g. Q4 Smart Contract Audit"
                       className="form-input" 
                       required
                     />
                   </div>
 
                   <div className="form-group">
-                    <label>Spending Limit (USDC)</label>
+                    <label>Locked Escrow Budget (USDC)</label>
                     <input 
                       type="number" 
                       value={newMilestoneBudget}
                       onChange={e => setNewMilestoneBudget(e.target.value)}
-                      placeholder="e.g. 50000"
+                      placeholder="e.g. 10000"
                       className="form-input" 
                       required
                     />
                   </div>
 
                   <div className="form-group">
-                    <label>Expires On</label>
+                    <label>Supplier / Provider Address</label>
+                    <input 
+                      type="text" 
+                      value={newMilestoneProvider}
+                      onChange={e => setNewMilestoneProvider(e.target.value)}
+                      placeholder="0x... (Recipient Address)"
+                      className="form-input" 
+                      style={{ fontFamily: 'var(--font-mono)' }}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label>Evaluator (Auditor Agent) Address</label>
+                    <input 
+                      type="text" 
+                      value={newMilestoneEvaluator}
+                      onChange={e => setNewMilestoneEvaluator(e.target.value)}
+                      placeholder="0x... (default: Auditor Agent)"
+                      className="form-input" 
+                      style={{ fontFamily: 'var(--font-mono)' }}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label>Agreement Expiration Date</label>
                     <input 
                       type="date" 
                       value={newMilestoneDeadline}
@@ -2122,8 +2419,8 @@ export default function App() {
                     />
                   </div>
 
-                  <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
-                    {vaultAddress ? 'Create Budget' : 'Create Budget (Demo)'}
+                  <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem', background: 'var(--primary-gradient)' }}>
+                    {vaultAddress ? '🔒 Deploy & Fund Escrow' : '🔒 Deploy & Fund Escrow (Demo)'}
                   </button>
                 </form>
               </div>
