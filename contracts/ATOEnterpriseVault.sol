@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "./interfaces/IComplianceOracle.sol";
 import "./interfaces/IERC8004Registry.sol";
+import "./ERC8183Job.sol";
 
 /**
  * @dev Standard interface for ERC20 USDC token.
@@ -45,6 +46,9 @@ contract ATOEnterpriseVault {
         uint256 timeDeadline;
         bool isActive;
         bool exists;
+        address jobContractAddress;
+        address provider;
+        address evaluator;
     }
 
     struct TransactionProposal {
@@ -261,16 +265,44 @@ contract ATOEnterpriseVault {
     function createMilestone(
         string calldata name, 
         uint256 allocatedERC20, 
-        uint256 duration
+        uint256 duration,
+        address provider,
+        address evaluator
     ) external onlyOwner {
+        if (provider == address(0) || evaluator == address(0)) revert InvalidAddress();
+
         milestoneCount++;
+        
+        // Deploy ERC-8183 Escrow Contract
+        ERC8183Job jobContract = new ERC8183Job(
+            address(this),
+            provider,
+            evaluator,
+            ERC20_USDC_ADDRESS,
+            allocatedERC20,
+            block.timestamp + duration,
+            bytes32(0)
+        );
+
+        // Approve the newly deployed job escrow contract to pull tokens
+        IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
+        if (usdc.balanceOf(address(this)) < allocatedERC20) revert InsufficientVaultBalance();
+
+        usdc.approve(address(jobContract), allocatedERC20);
+
+        // Call fund to lock target USDC into the job escrow contract
+        jobContract.fund(1);
+
         milestones[milestoneCount] = Milestone({
             name: name,
             allocatedERC20: allocatedERC20,
             spentERC20: 0,
             timeDeadline: block.timestamp + duration,
             isActive: true,
-            exists: true
+            exists: true,
+            jobContractAddress: address(jobContract),
+            provider: provider,
+            evaluator: evaluator
         });
 
         emit MilestoneCreated(milestoneCount, name, allocatedERC20, block.timestamp + duration);
@@ -351,14 +383,19 @@ contract ATOEnterpriseVault {
         if (block.timestamp > milestone.timeDeadline) revert DeadlinePassed();
         if (milestone.spentERC20 + amountERC20 > milestone.allocatedERC20) revert InsufficientMilestoneFunds();
 
-        IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
-        if (usdc.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
-
         milestone.spentERC20 += amountERC20;
         emit MilestoneSpent(milestoneId, recipient, amountERC20);
 
-        bool success = usdc.transfer(recipient, amountERC20);
-        if (!success) revert ExecutionFailed();
+        // If this milestone is backed by a deployed ERC-8183 escrow contract, the off-chain auditor 
+        // agent will trigger the releaseFunds / complete function directly on the job contract.
+        // Otherwise, execute the fallback direct transfer from the vault.
+        if (milestone.jobContractAddress == address(0)) {
+            IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
+            if (usdc.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
+            bool success = usdc.transfer(recipient, amountERC20);
+            if (!success) revert ExecutionFailed();
+        }
+
         return true;
     }
 
