@@ -30,6 +30,7 @@ const VAULT_ABI = [
     "function updateComplianceBlocklist(address target, bool isBlocklisted) external",
     "function complianceOracleAddress() external view returns (address)",
     "function agentNonces(address agent) external view returns (uint256)",
+    "function milestones(uint256 id) external view returns (string name, uint256 allocatedERC20, uint256 spentERC20, uint256 timeDeadline, bool isActive, bool exists, address jobContractAddress, address provider, address evaluator)",
     "event DirectTransferExecuted(address indexed agent, address indexed recipient, uint256 amountERC20)",
     "event MilestoneSpent(uint256 indexed milestoneId, address indexed recipient, uint256 amountERC20)"
 ];
@@ -79,6 +80,12 @@ class DecimalManager {
 // --- MULTI-AGENT ARCHITECTURE IMPLEMENTATION ---
 
 class AgentAuditor {
+    private walletId: string;
+
+    constructor(walletId: string) {
+        this.walletId = walletId;
+    }
+
     /**
      * Audits the current treasury state and processes incoming invoice triggers.
      */
@@ -112,6 +119,32 @@ class AgentAuditor {
         } catch (error: any) {
             console.error(`[Agent Alpha] Error reading on-chain state:`, error.message);
             return { isValid: false, reason: 'On-chain state read failed' };
+        }
+    }
+
+    /**
+     * Verifies deliverables and releases funds for an ERC-8183 Escrow contract.
+     */
+    async verifyAndReleaseFunds(jobEscrowAddress: string, jobId: number) {
+        console.log(`[Agent Alpha - The Auditor] Verifying work and triggering releaseFunds on Job ${jobId} at Escrow ${jobEscrowAddress}...`);
+        try {
+            const response = await circleClient.createContractExecutionTransaction({
+                walletId: this.walletId,
+                contractAddress: jobEscrowAddress,
+                abiFunctionSignature: 'releaseFunds(uint256)',
+                abiParameters: [jobId.toString()],
+                fee: {
+                    type: 'level',
+                    config: {
+                        feeLevel: 'MEDIUM'
+                    }
+                }
+            });
+            console.log(`[Agent Alpha] Escrow release transaction broadcasted successfully. Tx ID: ${response.data?.id}`);
+            return response.data;
+        } catch (error: any) {
+            console.error(`[Agent Alpha] Escrow release transaction failed:`, error.message);
+            throw error;
         }
     }
 }
@@ -282,6 +315,32 @@ class AgentAllocator {
         }
     }
 
+    /**
+     * Submits proof of completion for an ERC-8183 escrow contract.
+     */
+    async submitJobDeliverable(jobEscrowAddress: string, jobId: number, deliverableHash: string) {
+        console.log(`[Agent Gamma - The Allocator] Submitting deliverable hash ${deliverableHash} for Job ${jobId} at Escrow ${jobEscrowAddress}...`);
+        try {
+            const response = await circleClient.createContractExecutionTransaction({
+                walletId: this.walletId,
+                contractAddress: jobEscrowAddress,
+                abiFunctionSignature: 'submit(uint256,bytes32)',
+                abiParameters: [jobId.toString(), deliverableHash],
+                fee: {
+                    type: 'level',
+                    config: {
+                        feeLevel: 'MEDIUM'
+                    }
+                }
+            });
+            console.log(`[Agent Gamma] Deliverable submitted successfully. Tx ID: ${response.data?.id}`);
+            return response.data;
+        } catch (error: any) {
+            console.error(`[Agent Gamma] Deliverables submission failed:`, error.message);
+            throw error;
+        }
+    }
+
     private async getSignatureAndNonce(recipient: string, amount: bigint, vaultAddress: string) {
         const agentPrivateKey = process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY;
         if (!agentPrivateKey) {
@@ -330,7 +389,7 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
     console.log(`ATO TRANSACTION ORCHESTRATION RUN: Invoice ${invoice.id}`);
     console.log(`===============================================================`);
     
-    const auditor = new AgentAuditor();
+    const auditor = new AgentAuditor(circleWalletId);
     const riskOfficer = new AgentRiskOfficer();
     const allocator = new AgentAllocator(circleWalletId);
 
@@ -348,16 +407,51 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
         return { success: false, phase: 'RISK_OFFICER', error: 'Compliance screening failed' };
     }
 
-    // Step 3: Secure Asset Allocation & L1 Dispatch
+    // Step 3: Secure Asset Allocation & L1 Escrow / Dispatch
     try {
-        const txResult = await allocator.executeAutonomousTreasuryPayment(invoice);
-        if (!txResult) {
-            throw new Error("Transaction allocation returned empty result.");
+        if (invoice.type === 'milestone') {
+            if (invoice.milestoneId === undefined) {
+                return { success: false, phase: 'ALLOCATOR', error: 'milestoneId is required for milestone invoices' };
+            }
+
+            const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
+            const milestone = await vaultContract.milestones(invoice.milestoneId);
+            const jobEscrowAddress = milestone.jobContractAddress;
+
+            if (!jobEscrowAddress || jobEscrowAddress === ethers.ZeroAddress) {
+                return { success: false, phase: 'ALLOCATOR', error: 'No ERC-8183 Job Escrow contract found for this milestone.' };
+            }
+
+            console.log(`[ATO Orchestrator] Found ERC-8183 Job contract at: ${jobEscrowAddress}`);
+
+            // Step A: Allocator (Gamma) submits deliverables proof
+            console.log(`[ATO Orchestrator] STEP 3A: Allocator submitting deliverables proof...`);
+            const dummyProofHash = ethers.keccak256(ethers.toUtf8Bytes(`deliverable_proof_for_invoice_${invoice.id}`));
+            const submitTx = await allocator.submitJobDeliverable(jobEscrowAddress, 1, dummyProofHash);
+
+            // Step B: Auditor (Alpha) verifies deliverables and releases funds
+            console.log(`[ATO Orchestrator] STEP 3B: Auditor verifying deliverables and releasing escrow...`);
+            const releaseTx = await auditor.verifyAndReleaseFunds(jobEscrowAddress, 1);
+
+            console.log(`===============================================================`);
+            console.log(`[ATO Orchestrator] PIPELINE ESCROW COMPLETED SUCCESSFULLY.`);
+            console.log(`===============================================================\n`);
+            return { 
+                success: true, 
+                txId: releaseTx?.id || submitTx?.id, 
+                state: releaseTx?.state || 'BROADCASTED',
+                jobEscrowAddress 
+            };
+        } else {
+            const txResult = await allocator.executeAutonomousTreasuryPayment(invoice);
+            if (!txResult) {
+                throw new Error("Transaction allocation returned empty result.");
+            }
+            console.log(`===============================================================`);
+            console.log(`[ATO Orchestrator] PIPELINE COMPLETED SUCCESSFULLY.`);
+            console.log(`===============================================================\n`);
+            return { success: true, txId: txResult.id, state: txResult.state };
         }
-        console.log(`===============================================================`);
-        console.log(`[ATO Orchestrator] PIPELINE COMPLETED SUCCESSFULLY.`);
-        console.log(`===============================================================\n`);
-        return { success: true, txId: txResult.id, state: txResult.state };
     } catch (e: any) {
         return { success: false, phase: 'ALLOCATOR', error: e.message };
     }
