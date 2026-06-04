@@ -57,22 +57,29 @@ async function main() {
     // We assume the contract has been compiled. If running standard deploy,
     // we define the ABI and bytecode lookup logic.
     const artifactPath = path.join(__dirname, '../artifacts/contracts/ATOEnterpriseVault.sol/ATOEnterpriseVault.json');
+    const oracleArtifactPath = path.join(__dirname, '../artifacts/contracts/MockComplianceOracle.sol/MockComplianceOracle.json');
+    const registryArtifactPath = path.join(__dirname, '../artifacts/contracts/ERC8004Registry.sol/ERC8004Registry.json');
     let abi: any;
     let bytecode: string;
+    let oracleAbi: any;
+    let oracleBytecode: string;
+    let registryAbi: any;
+    let registryBytecode: string;
 
-    if (fs.existsSync(artifactPath)) {
+    if (fs.existsSync(artifactPath) && fs.existsSync(oracleArtifactPath) && fs.existsSync(registryArtifactPath)) {
         const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
         abi = artifact.abi;
         bytecode = artifact.bytecode;
-        console.log(`[Artifact Loader] Successfully loaded compilation artifacts from: ${artifactPath}`);
+        const oracleArtifact = JSON.parse(fs.readFileSync(oracleArtifactPath, 'utf8'));
+        oracleAbi = oracleArtifact.abi;
+        oracleBytecode = oracleArtifact.bytecode;
+        const registryArtifact = JSON.parse(fs.readFileSync(registryArtifactPath, 'utf8'));
+        registryAbi = registryArtifact.abi;
+        registryBytecode = registryArtifact.bytecode;
+        console.log(`[Artifact Loader] Successfully loaded compilation artifacts for Vault, Oracle, and Registry.`);
     } else {
-        console.warn(`[Artifact Loader] Hardhat artifact not found at ${artifactPath}.`);
-        console.log(`[Artifact Loader] Falling back to pre-compiled bytecode wrapper interface.`);
-        
-        // If artifacts folder doesn't exist yet, we guide the user to compile first,
-        // or provide the layout. For a professional blueprint, we expect standard compiling:
-        console.log(">>> Please compile the contracts using 'npx hardhat compile' or 'forge build' before running this script.");
-        console.log(">>> Make sure to configure hardhat.config.ts with the Arc Testnet coordinates.");
+        console.warn(`[Artifact Loader] Hardhat artifacts not found.`);
+        console.log(">>> Please compile the contracts using 'npx hardhat compile' before running this script.");
         process.exit(1);
     }
 
@@ -86,29 +93,55 @@ async function main() {
     console.log(`  - Required Multi-Sig Signatures: ${requiredSignatures}`);
     console.log(`  - Autonomous Agent Payout Limit: 5,000 USDC (6 decimals: ${agentLimitERC20.toString()})`);
 
-    console.log(`\n[Deployment Process] Broadcasting deployment transaction to Arc L1...`);
+    console.log(`\n[Deployment Process] Broadcasting deployment transactions to Arc L1...`);
 
     try {
+        // Deploy Mock Compliance Oracle first
+        console.log(`[Deployment Process] Deploying Mock Compliance Oracle...`);
+        const oracleFactory = new ethers.ContractFactory(oracleAbi, oracleBytecode, deployerWallet);
+        const oracleContract = await oracleFactory.deploy();
+        await oracleContract.waitForDeployment();
+        const oracleDeployedAddress = await oracleContract.getAddress();
+        console.log(`Mock Compliance Oracle deployed at: ${oracleDeployedAddress}`);
+
+        // Deploy ERC-8004 Agent Registry
+        console.log(`[Deployment Process] Deploying ERC-8004 Agent Registry...`);
+        const registryFactory = new ethers.ContractFactory(registryAbi, registryBytecode, deployerWallet);
+        const registryContract = await registryFactory.deploy();
+        await registryContract.waitForDeployment();
+        const registryDeployedAddress = await registryContract.getAddress();
+        console.log(`ERC-8004 Registry deployed at: ${registryDeployedAddress}`);
+
+        // Deploy Vault
+        console.log(`[Deployment Process] Deploying ATO Enterprise Vault...`);
         const factory = new ethers.ContractFactory(abi, bytecode, deployerWallet);
-        
-        // Deploying the contract
         const contract = await factory.deploy(initialOwners, requiredSignatures, agentLimitERC20);
-        
-        console.log(`[Deployment Process] Transaction broadcasted. Waiting for sub-second confirmation...`);
         await contract.waitForDeployment();
-        
         const deployedAddress = await contract.getAddress();
+        
+        console.log(`[Deployment Process] Registering compliance oracle in Vault...`);
+        const vaultContract = new ethers.Contract(deployedAddress, abi, deployerWallet);
+        const tx = await vaultContract.setComplianceOracleAddress(oracleDeployedAddress);
+        await tx.wait();
+        console.log(`Compliance Oracle address successfully registered in the Vault!`);
+
+        console.log(`[Deployment Process] Registering Agent Registry in Vault...`);
+        const regTx = await vaultContract.setAgentRegistryAddress(registryDeployedAddress);
+        await regTx.wait();
+        console.log(`Agent Registry address successfully registered in the Vault!`);
+
         console.log(`\n===============================================================`);
-        console.log(`SUCCESS: ATO Smart Contract successfully deployed on Arc L1!`);
+        console.log(`SUCCESS: ATO Smart Contracts successfully deployed on Arc L1!`);
         console.log(`===============================================================`);
-        console.log(`  - Contract Address: ${deployedAddress}`);
+        console.log(`  - Vault Address: ${deployedAddress}`);
+        console.log(`  - Oracle Address: ${oracleDeployedAddress}`);
+        console.log(`  - Registry Address: ${registryDeployedAddress}`);
         console.log(`  - Transaction Hash: ${contract.deploymentTransaction()?.hash}`);
         console.log(`  - Explorer Link: https://testnet.arcscan.app/address/${deployedAddress}`);
         console.log(`===============================================================\n`);
 
         // 4. Run Smoke Tests & Verification
         console.log(`[Smoke Testing] Verifying contract utilities on-chain...`);
-        const vaultContract = new ethers.Contract(deployedAddress, abi, deployerWallet);
 
         // Test dual-decimal converter
         const testERC20Amount = 100n * (10n ** 6n); // 100 USDC (6 decimals)
@@ -126,7 +159,8 @@ async function main() {
 
         console.log(`[Smoke Testing] Active Owners count: ${initialOwners.length}`);
         console.log(`\n>>> Please update your backend .env file with:`);
-        console.log(`VAULT_CONTRACT_ADDRESS=${deployedAddress}\n`);
+        console.log(`VAULT_CONTRACT_ADDRESS=${deployedAddress}`);
+        console.log(`REGISTRY_CONTRACT_ADDRESS=${registryDeployedAddress}\n`);
 
     } catch (deployError: any) {
         console.error(`\n[Deployment Failure] Deployment failed with exception:`);

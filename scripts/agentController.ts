@@ -1,6 +1,7 @@
 import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-controlled-wallets';
 import { ethers } from 'ethers';
 import * as dotenv from 'dotenv';
+import crypto from 'crypto';
 
 // Load environment variables for local secrets management
 dotenv.config();
@@ -23,10 +24,12 @@ const provider = new ethers.JsonRpcProvider(ARC_TESTNET_RPC_URL);
 // Contract ABI fragments for transaction construction and pre-flight validation
 const VAULT_ABI = [
     "function getTreasuryBalances() external view returns (uint256 erc20Balance, uint256 nativeGasBalance)",
-    "function agentDirectPayoutERC20(address recipient, uint256 amountERC20) external returns (bool)",
+    "function agentDirectPayoutERC20(address recipient, uint256 amountERC20, uint256 nonce, bytes calldata signature) external returns (bool)",
     "function agentExecuteMilestonePayout(uint256 milestoneId, address recipient, uint256 amountERC20) external returns (bool)",
     "function isAddressBlocklisted(address target) external view returns (bool)",
     "function updateComplianceBlocklist(address target, bool isBlocklisted) external",
+    "function complianceOracleAddress() external view returns (address)",
+    "function agentNonces(address agent) external view returns (uint256)",
     "event DirectTransferExecuted(address indexed agent, address indexed recipient, uint256 amountERC20)",
     "event MilestoneSpent(uint256 indexed milestoneId, address indexed recipient, uint256 amountERC20)"
 ];
@@ -123,21 +126,70 @@ class AgentRiskOfficer {
         console.log(`[Agent Beta - The Risk Officer] Performing pre-flight compliance check on ${recipientAddress}...`);
         
         try {
-            // 1. Verify address against the Vault's on-chain mock compliance layer (Pre-flight Static Call)
             const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
+
+            // 1. Verify address against the Vault's on-chain mock compliance layer
             const isBlocklistedOnChain = await vaultContract.isAddressBlocklisted(recipientAddress);
-            
             if (isBlocklistedOnChain) {
                 console.error(`[Agent Beta - Risk Alert] Address ${recipientAddress} is blocklisted in the Vault Contract compliance registry! Transaction halted.`);
                 return false;
             }
 
+            // Check compliance oracle if registered on-chain
+            try {
+                const oracleAddress = await vaultContract.complianceOracleAddress();
+                if (oracleAddress !== ethers.ZeroAddress) {
+                    console.log(`[Agent Beta] Querying on-chain compliance oracle at ${oracleAddress}...`);
+                    const oracleABI = ["function isAddressCompliant(address target) external view returns (bool)"];
+                    const oracleContract = new ethers.Contract(oracleAddress, oracleABI, provider);
+                    const isCompliantOnChainOracle = await oracleContract.isAddressCompliant(recipientAddress);
+                    if (!isCompliantOnChainOracle) {
+                        console.error(`[Agent Beta - Risk Alert] Address ${recipientAddress} is marked non-compliant by on-chain Oracle! Transaction halted.`);
+                        return false;
+                    }
+                }
+            } catch (oracleErr: any) {
+                console.warn(`[Agent Beta] On-chain oracle check failed: ${oracleErr.message}. Continuing with off-chain check.`);
+            }
+
             // 2. Query Circle's Compliance Endpoints to verify real-time status of the wallet
-            // In a real sandbox/production run, this uses the Circle developer dashboard integrations.
             console.log(`[Agent Beta] Querying Circle Compliance risk scoring service...`);
-            const mockCircleRiskAssessment = true; // Simulating active success. If blocklisted by Circle, this returns false.
             
-            if (!mockCircleRiskAssessment) {
+            let isCompliantByCircle = true;
+            let screeningResult = "APPROVED";
+
+            try {
+                const idempotencyKey = crypto.randomUUID();
+                const response = await fetch('https://api.circle.com/v1/w3s/compliance/screening/addresses', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${CIRCLE_API_KEY}`
+                    },
+                    body: JSON.stringify({
+                        idempotencyKey,
+                        address: recipientAddress,
+                        chain: 'ETH-SEPOLIA'
+                    })
+                });
+
+                if (response.status === 200 || response.status === 201) {
+                    const data: any = await response.json();
+                    screeningResult = data.result || "APPROVED";
+                    if (screeningResult === "DENIED") {
+                        isCompliantByCircle = false;
+                        console.error(`[Agent Beta - Risk Alert] Circle Compliance Screening returned DENIED for address ${recipientAddress}!`);
+                    } else {
+                        console.log(`[Agent Beta] Circle Compliance screening passed: ${screeningResult}`);
+                    }
+                } else {
+                    console.warn(`[Agent Beta] Compliance API returned HTTP code ${response.status}. Proceeding with local mock fallback checks.`);
+                }
+            } catch (err: any) {
+                console.warn(`[Agent Beta] Compliance API request failed: ${err.message}. Proceeding with local mock fallback checks.`);
+            }
+
+            if (!isCompliantByCircle) {
                 console.error(`[Agent Beta - Risk Alert] Address flagged by Circle developer compliance layer!`);
                 return false;
             }
@@ -159,22 +211,20 @@ class AgentAllocator {
         this.walletId = walletId;
     }
 
-    /**
-     * Computes the exact values, wraps gas estimates, structures payload, and triggers 
-     * execution via the Circle Developer-Controlled Wallets client.
-     */
     async executeAutonomousTreasuryPayment(invoice: InvoicePayload) {
         console.log(`[Agent Gamma - The Allocator] Structuring execution for Invoice ${invoice.id}...`);
 
         const amountERC20Units = DecimalManager.toERC20Units(invoice.amountUSDC);
         const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
         
+        let signature = "0x";
+        let nonce = 0n;
         let txData: string;
+
         if (invoice.type === 'milestone') {
             if (invoice.milestoneId === undefined) {
                 throw new Error("Milestone payment requested but milestoneId is undefined.");
             }
-            // Construct payload for milestone payment execution: agentExecuteMilestonePayout(milestoneId, recipient, amountERC20)
             txData = vaultContract.interface.encodeFunctionData('agentExecuteMilestonePayout', [
                 invoice.milestoneId,
                 invoice.recipientAddress,
@@ -182,29 +232,34 @@ class AgentAllocator {
             ]);
             console.log(`[Agent Gamma] Encoded payout function: agentExecuteMilestonePayout(${invoice.milestoneId}, ${invoice.recipientAddress}, ${amountERC20Units} units)`);
         } else {
-            // Construct payload for direct payroll/supplier payout: agentDirectPayoutERC20(recipient, amountERC20)
+            const sigInfo = await this.getSignatureAndNonce(invoice.recipientAddress, amountERC20Units, VAULT_CONTRACT_ADDRESS);
+            signature = sigInfo.signature;
+            nonce = sigInfo.nonce;
+
             txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutERC20', [
                 invoice.recipientAddress,
-                amountERC20Units
+                amountERC20Units,
+                nonce,
+                signature
             ]);
-            console.log(`[Agent Gamma] Encoded payout function: agentDirectPayoutERC20(${invoice.recipientAddress}, ${amountERC20Units} units)`);
+            console.log(`[Agent Gamma] Generated Agent Cryptographic Signature for transaction approval:`);
+            console.log(`  - Signer Address: ${sigInfo.agentAddress}`);
+            console.log(`  - Nonce: ${nonce.toString()}`);
+            console.log(`  - Signature: ${signature}`);
         }
 
         console.log(`[Agent Gamma] Submitting transaction payload to Circle Developer-Controlled Wallets on Arc Testnet (Chain ID 5042002)...`);
         
         try {
-            // Using Circle Developer-Controlled Wallets API to send contract execution payload.
-            // Under the hood, Circle sponsors or executes gas via USDC gas allocations.
-            // On Arc L1, the gas calculations automatically scale to 18 decimals internally.
             const response = await circleClient.createContractExecutionTransaction({
                 walletId: this.walletId,
                 contractAddress: VAULT_CONTRACT_ADDRESS,
                 abiFunctionSignature: invoice.type === 'milestone' 
                     ? 'agentExecuteMilestonePayout(uint256,address,uint256)' 
-                    : 'agentDirectPayoutERC20(address,uint256)',
+                    : 'agentDirectPayoutERC20(address,uint256,uint256,bytes)',
                 abiParameters: invoice.type === 'milestone' 
                     ? [invoice.milestoneId!, invoice.recipientAddress, amountERC20Units.toString()] 
-                    : [invoice.recipientAddress, amountERC20Units.toString()],
+                    : [invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), signature],
                 fee: {
                     type: 'level',
                     config: {
@@ -225,6 +280,26 @@ class AgentAllocator {
             this.handleSystemException(error);
             throw error;
         }
+    }
+
+    private async getSignatureAndNonce(recipient: string, amount: bigint, vaultAddress: string) {
+        const agentPrivateKey = process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY;
+        if (!agentPrivateKey) {
+            throw new Error("AGENT_PRIVATE_KEY or PRIVATE_KEY must be set in .env for signing.");
+        }
+        const agentSigner = new ethers.Wallet(agentPrivateKey, provider);
+        const agentAddress = await agentSigner.getAddress();
+        const vaultContract = new ethers.Contract(vaultAddress, VAULT_ABI, provider);
+        const nonce = await vaultContract.agentNonces(agentAddress);
+        const network = await provider.getNetwork();
+        const chainId = network.chainId;
+
+        const messageHash = ethers.solidityPackedKeccak256(
+            ['address', 'uint256', 'uint256', 'address', 'uint256'],
+            [recipient, amount, nonce, vaultAddress, chainId]
+        );
+        const signature = await agentSigner.signMessage(ethers.getBytes(messageHash));
+        return { signature, nonce, agentAddress };
     }
 
     /**
