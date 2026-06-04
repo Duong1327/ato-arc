@@ -157,6 +157,63 @@ export default function App() {
     { address: '0x3f382a3bE2F677cD6303Cec089B5F319D72a9999', label: 'Flagged Account (Suspicious)', isBlocklisted: true }
   ]);
 
+  // Compliance Oracle Settings
+  const [oracleAddress, setOracleAddress] = useState<string>('');
+  const [newOracleAddress, setNewOracleAddress] = useState<string>('');
+
+  const [complianceSubTab, setComplianceSubTab] = useState<'registry' | 'risk-assessment'>('registry');
+
+  interface RiskProfile {
+    address: string;
+    riskScore: number;
+    decision: 'APPROVED' | 'DENIED';
+    pepFlag: boolean;
+    amlFlag: boolean;
+    sanctionedJurisdiction: string;
+    riskCategories: string[];
+    reasons: string[];
+    lastScreened: string;
+  }
+
+  const [riskProfiles, setRiskProfiles] = useState<RiskProfile[]>([
+    {
+      address: '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a',
+      riskScore: 5,
+      decision: 'APPROVED',
+      pepFlag: false,
+      amlFlag: false,
+      sanctionedJurisdiction: 'None',
+      riskCategories: [],
+      reasons: ['Verified commercial supplier address', 'Clean historical transactions'],
+      lastScreened: '2026-06-04 14:22:29'
+    },
+    {
+      address: '0x49B50855Aa3bE2F677cD6303Cec089B5F319D72a',
+      riskScore: 12,
+      decision: 'APPROVED',
+      pepFlag: false,
+      amlFlag: false,
+      sanctionedJurisdiction: 'None',
+      riskCategories: [],
+      reasons: ['Verified corporate payroll recipient'],
+      lastScreened: '2026-06-04 14:22:29'
+    },
+    {
+      address: '0x3f382a3bE2F677cD6303Cec089B5F319D72a9999',
+      riskScore: 95,
+      decision: 'DENIED',
+      pepFlag: true,
+      amlFlag: true,
+      sanctionedJurisdiction: 'Iran',
+      riskCategories: ['Sanctions', 'PEP Association', 'High-Risk Jurisdiction'],
+      reasons: ['Recipient matched on OFAC SDN listing', 'Jurisdiction matches sanctioned territory (Iran)', 'Indirect transactions with flagged mixers'],
+      lastScreened: '2026-06-04 14:22:30'
+    }
+  ]);
+
+  const [selectedRiskProfile, setSelectedRiskProfile] = useState<string>('0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a');
+  const [manualRiskAddress, setManualRiskAddress] = useState<string>('');
+
   // Form State
   const [invoice, setInvoice] = useState<InvoiceForm>({
     id: 'INV-2026-004',
@@ -249,6 +306,123 @@ export default function App() {
       enabled: isConnected && !!vaultAddress && isAddress(vaultAddress),
     }
   });
+
+  const { data: onChainOracleAddress, refetch: refetchOracleAddress } = useReadContract({
+    address: vaultAddress as `0x${string}`,
+    abi: ATO_VAULT_ABI,
+    functionName: 'complianceOracleAddress',
+    chainId: 5042002,
+    query: {
+      enabled: isConnected && !!vaultAddress && isAddress(vaultAddress),
+    }
+  });
+
+  useEffect(() => {
+    if (onChainOracleAddress) {
+      setOracleAddress(onChainOracleAddress as string);
+    }
+  }, [onChainOracleAddress]);
+
+  // --- READ DEPLOYED VAULT AGENT REGISTRY ADDRESS ---
+  const { data: onChainRegistryAddress, refetch: refetchRegistryAddress } = useReadContract({
+    address: vaultAddress as `0x${string}`,
+    abi: ATO_VAULT_ABI,
+    functionName: 'agentRegistryAddress',
+    chainId: 5042002,
+    query: {
+      enabled: isConnected && !!vaultAddress && isAddress(vaultAddress),
+    }
+  });
+
+  const [registryAddress, setRegistryAddress] = useState<string>('');
+  const [newRegistryAddress, setNewRegistryAddress] = useState<string>('');
+
+  useEffect(() => {
+    if (onChainRegistryAddress) {
+      setRegistryAddress(onChainRegistryAddress as string);
+    }
+  }, [onChainRegistryAddress]);
+
+  interface AgentInfo {
+    address: string;
+    role: string;
+    id: number;
+    uri: string;
+    reputation: number;
+    isRegistered: boolean;
+  }
+
+  const [agentsList, setAgentsList] = useState<AgentInfo[]>([
+    {
+      address: '0x1111111111111111111111111111111111111111',
+      role: 'Auditor Agent',
+      id: 2,
+      uri: 'ipfs://bafybeicdxo3pwtmq7y3wzly4r7c2gq5ux6m6qexgugpwnm46vcrkgnn4mq/auditor.json',
+      reputation: 98,
+      isRegistered: true
+    },
+    {
+      address: '0x2222222222222222222222222222222222222222',
+      role: 'Risk Officer Agent',
+      id: 3,
+      uri: 'ipfs://bafybeicdxo3pwtmq7y3wzly4r7c2gq5ux6m6qexgugpwnm46vcrkgnn4mq/riskofficer.json',
+      reputation: 97,
+      isRegistered: true
+    },
+    {
+      address: '0x0c392a7A89F26253ee17a650a107e123f0966125', // Fallback Allocator address
+      role: 'Allocator Agent',
+      id: 1,
+      uri: 'ipfs://bafybeicdxo3pwtmq7y3wzly4r7c2gq5ux6m6qexgugpwnm46vcrkgnn4mq/allocator.json',
+      reputation: 95,
+      isRegistered: true
+    }
+  ]);
+
+  const [newAgentAddress, setNewAgentAddress] = useState('');
+  const [newAgentURI, setNewAgentURI] = useState('');
+  const [newAgentReputation, setNewAgentReputation] = useState('95');
+  const [updateRepAgentAddress, setUpdateRepAgentAddress] = useState('');
+  const [updateRepScore, setUpdateRepScore] = useState('95');
+
+  useEffect(() => {
+    if (!isConnected || !registryAddress || !isAddress(registryAddress) || !publicClient) return;
+
+    const fetchRegistryData = async () => {
+      try {
+        const updatedList = [...agentsList];
+        addLog('SYSTEM', `Syncing with Agent Registry at ${registryAddress}...`, 'INFO');
+        
+        for (let i = 0; i < updatedList.length; i++) {
+          const agent = updatedList[i];
+          try {
+            const regInfo = await publicClient.readContract({
+              address: registryAddress as `0x${string}`,
+              abi: ERC8004_REGISTRY_ABI,
+              functionName: 'agents',
+              args: [agent.address as `0x${string}`]
+            }) as [bigint, string, bigint, boolean];
+
+            updatedList[i] = {
+              ...agent,
+              id: Number(regInfo[0]),
+              uri: regInfo[1],
+              reputation: Number(regInfo[2]),
+              isRegistered: regInfo[3]
+            };
+          } catch (err) {
+            console.warn(`Could not read agent info for ${agent.address}:`, err);
+          }
+        }
+        setAgentsList(updatedList);
+        addLog('SYSTEM', `ERC-8004 Agent registry metrics loaded.`, 'SUCCESS');
+      } catch (e: any) {
+        console.error("Error reading registry status:", e);
+      }
+    };
+
+    fetchRegistryData();
+  }, [registryAddress, isConnected, publicClient]);
 
   // --- READ DEPLOYED VAULT MILESTONE COUNT ---
   const { data: milestoneCountVal, refetch: refetchMilestoneCount } = useReadContract({
@@ -426,6 +600,164 @@ export default function App() {
     }
   };
 
+  const handleUpdateOracleAddress = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!vaultAddress || !isAddress(vaultAddress)) {
+      alert("No active on-chain vault selected.");
+      return;
+    }
+    if (!isAddress(newOracleAddress)) {
+      alert("Please enter a valid EVM address.");
+      return;
+    }
+    try {
+      addLog('RISK_OFFICER', `Broadcasting oracle address update to: ${newOracleAddress}...`, 'INFO');
+      const tx = await writeContract({
+        address: vaultAddress as `0x${string}`,
+        abi: ATO_VAULT_ABI,
+        functionName: 'setComplianceOracleAddress',
+        args: [newOracleAddress as `0x${string}`]
+      });
+      addLog('SYSTEM', `Transaction broadcasted. Tx Hash: ${tx}`, 'SUCCESS');
+      setOracleAddress(newOracleAddress);
+      setNewOracleAddress('');
+      refetchOracleAddress();
+    } catch (err: any) {
+      addLog('RISK_OFFICER', `Oracle update failed: ${err.message || err}`, 'ERROR');
+    }
+  };
+
+  const handleUpdateRegistryAddress = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!vaultAddress || !isAddress(vaultAddress)) {
+      alert("No active on-chain vault selected.");
+      return;
+    }
+    if (!isAddress(newRegistryAddress)) {
+      alert("Please enter a valid EVM address.");
+      return;
+    }
+    try {
+      addLog('SYSTEM', `Broadcasting agent registry address update to: ${newRegistryAddress}...`, 'INFO');
+      const tx = await writeContract({
+        address: vaultAddress as `0x${string}`,
+        abi: ATO_VAULT_ABI,
+        functionName: 'setAgentRegistryAddress',
+        args: [newRegistryAddress as `0x${string}`]
+      });
+      addLog('SYSTEM', `Transaction broadcasted. Tx Hash: ${tx}`, 'SUCCESS');
+      setRegistryAddress(newRegistryAddress);
+      setNewRegistryAddress('');
+      refetchRegistryAddress();
+    } catch (err: any) {
+      addLog('SYSTEM', `Registry update failed: ${err.message || err}`, 'ERROR');
+    }
+  };
+
+  const handleRegisterAgent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!registryAddress || !isAddress(registryAddress)) {
+      alert("No active Agent Registry address configured.");
+      return;
+    }
+    if (!isAddress(newAgentAddress)) {
+      alert("Invalid agent address.");
+      return;
+    }
+    try {
+      addLog('SYSTEM', `Registering new agent ${newAgentAddress} on ERC-8004 Registry...`, 'INFO');
+      const tx = await writeContract({
+        address: registryAddress as `0x${string}`,
+        abi: ERC8004_REGISTRY_ABI,
+        functionName: 'registerAgent',
+        args: [newAgentAddress as `0x${string}`, newAgentURI, BigInt(newAgentReputation)]
+      });
+      addLog('SYSTEM', `Agent registration broadcasted. Tx Hash: ${tx}`, 'SUCCESS');
+      
+      if (!agentsList.some(a => a.address.toLowerCase() === newAgentAddress.toLowerCase())) {
+        setAgentsList(prev => [...prev, {
+          address: newAgentAddress,
+          role: 'Custom Agent',
+          id: 0,
+          uri: newAgentURI,
+          reputation: parseInt(newAgentReputation),
+          isRegistered: true
+        }]);
+      }
+      setNewAgentAddress('');
+      setNewAgentURI('');
+      setNewAgentReputation('95');
+    } catch (err: any) {
+      addLog('SYSTEM', `Agent registration failed: ${err.message || err}`, 'ERROR');
+    }
+  };
+
+  const handleUpdateReputation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!registryAddress || !isAddress(registryAddress)) {
+      alert("No active Agent Registry address configured.");
+      return;
+    }
+    if (!isAddress(updateRepAgentAddress)) {
+      alert("Invalid agent address.");
+      return;
+    }
+    try {
+      addLog('SYSTEM', `Updating reputation score for agent ${updateRepAgentAddress} to ${updateRepScore}...`, 'INFO');
+      const tx = await writeContract({
+        address: registryAddress as `0x${string}`,
+        abi: ERC8004_REGISTRY_ABI,
+        functionName: 'updateReputation',
+        args: [updateRepAgentAddress as `0x${string}`, BigInt(updateRepScore)]
+      });
+      addLog('SYSTEM', `Reputation update broadcasted. Tx Hash: ${tx}`, 'SUCCESS');
+      
+      setAgentsList(prev => prev.map(a => {
+        if (a.address.toLowerCase() === updateRepAgentAddress.toLowerCase()) {
+          return { ...a, reputation: parseInt(updateRepScore) };
+        }
+        return a;
+      }));
+      setUpdateRepAgentAddress('');
+      setUpdateRepScore('95');
+    } catch (err: any) {
+      addLog('SYSTEM', `Reputation update failed: ${err.message || err}`, 'ERROR');
+    }
+  };
+
+  const handleManualRiskCheck = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAddress(manualRiskAddress)) {
+      alert("Invalid EVM Address");
+      return;
+    }
+    addLog('RISK_OFFICER', `Querying Circle AML screening API for address ${manualRiskAddress}...`, 'INFO');
+    const isMockBlocked = manualRiskAddress.toLowerCase().endsWith('9999');
+    const score = isMockBlocked ? 98 : Math.floor(Math.random() * 20) + 1;
+    const decision = isMockBlocked ? 'DENIED' : 'APPROVED';
+    const newProfile: RiskProfile = {
+      address: manualRiskAddress,
+      riskScore: score,
+      decision,
+      pepFlag: isMockBlocked,
+      amlFlag: isMockBlocked,
+      sanctionedJurisdiction: isMockBlocked ? 'Iran' : 'None',
+      riskCategories: isMockBlocked ? ['Sanctions', 'AML Flag'] : [],
+      reasons: isMockBlocked 
+        ? ['OFAC SDN list match', 'Mixer correlation detected'] 
+        : ['Address clear of AML flags', 'Low risk index'],
+      lastScreened: new Date().toISOString().replace('T', ' ').slice(0, 19)
+    };
+
+    setRiskProfiles(prev => {
+      const filtered = prev.filter(p => p.address.toLowerCase() !== manualRiskAddress.toLowerCase());
+      return [newProfile, ...filtered];
+    });
+    setSelectedRiskProfile(manualRiskAddress);
+    setManualRiskAddress('');
+    addLog('RISK_OFFICER', `Compliance screening complete. Decision: ${decision}. Score: ${score}/100.`, decision === 'APPROVED' ? 'SUCCESS' : 'WARNING');
+  };
+
   // --- SUBMIT PAYOUT TO SMART CONTRACT ---
   const handleSimulatePayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -463,6 +795,30 @@ export default function App() {
     // STEP 2: Agent Beta (Risk Officer) Compliance Screening
     await new Promise(r => setTimeout(r, 1200));
 
+    // Simulate calling Circle compliance API
+    const isMockBlocked = invoice.recipientAddress.toLowerCase().endsWith('9999');
+    const score = isMockBlocked ? 98 : Math.floor(Math.random() * 20) + 1;
+    const decision = isMockBlocked ? 'DENIED' : 'APPROVED';
+    const newProfile: RiskProfile = {
+      address: invoice.recipientAddress,
+      riskScore: score,
+      decision,
+      pepFlag: isMockBlocked,
+      amlFlag: isMockBlocked,
+      sanctionedJurisdiction: isMockBlocked ? 'Iran' : 'None',
+      riskCategories: isMockBlocked ? ['Sanctions', 'AML Flag'] : [],
+      reasons: isMockBlocked 
+        ? ['OFAC SDN list match', 'Mixer correlation detected'] 
+        : ['Address clear of AML flags', 'Low risk index'],
+      lastScreened: new Date().toISOString().replace('T', ' ').slice(0, 19)
+    };
+
+    setRiskProfiles(prev => {
+      const filtered = prev.filter(p => p.address.toLowerCase() !== invoice.recipientAddress.toLowerCase());
+      return [newProfile, ...filtered];
+    });
+    setSelectedRiskProfile(invoice.recipientAddress);
+
     let isBlocklisted = false;
     if (vaultAddress && isAddress(vaultAddress) && publicClient) {
       try {
@@ -483,6 +839,10 @@ export default function App() {
         c => c.address.toLowerCase() === invoice.recipientAddress.toLowerCase()
       );
       isBlocklisted = targetRegistry ? targetRegistry.isBlocklisted : false;
+    }
+
+    if (decision === 'DENIED') {
+      isBlocklisted = true;
     }
 
     if (isBlocklisted) {
@@ -1773,43 +2133,409 @@ export default function App() {
 
           {/* TAB 5: COMPLIANCE REGISTRY */}
           {activeTab === 'compliance' && (
+            <div>
+              {/* Sub-tab selection */}
+              <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '1.5rem', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '0.5rem' }}>
+                <button 
+                  onClick={() => setComplianceSubTab('registry')}
+                  className="nav-link"
+                  style={{ 
+                    background: 'transparent', 
+                    border: 'none', 
+                    color: complianceSubTab === 'registry' ? 'var(--accent-pink)' : 'var(--text-secondary)',
+                    borderBottom: complianceSubTab === 'registry' ? '2px solid var(--accent-pink)' : 'none',
+                    paddingBottom: '0.5rem',
+                    cursor: 'pointer',
+                    fontWeight: complianceSubTab === 'registry' ? 'bold' : 'normal'
+                  }}
+                >
+                  Trusted Recipients
+                </button>
+                <button 
+                  onClick={() => setComplianceSubTab('risk-assessment')}
+                  className="nav-link"
+                  style={{ 
+                    background: 'transparent', 
+                    border: 'none', 
+                    color: complianceSubTab === 'risk-assessment' ? 'var(--accent-pink)' : 'var(--text-secondary)',
+                    borderBottom: complianceSubTab === 'risk-assessment' ? '2px solid var(--accent-pink)' : 'none',
+                    paddingBottom: '0.5rem',
+                    cursor: 'pointer',
+                    fontWeight: complianceSubTab === 'risk-assessment' ? 'bold' : 'normal'
+                  }}
+                >
+                  Risk Assessment Reports
+                </button>
+              </div>
+
+              {complianceSubTab === 'registry' && (
+                <div className="compliance-tab-grid">
+                  
+                  {/* Compliance list */}
+                  <div className="compliance-list">
+                    <div className="glass-panel">
+                      <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>Trusted Recipients</h3>
+                      <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                        Before any payment goes out, we check that the recipient is safe. You can manage your trust list here.
+                      </p>
+
+                      <div className="screening-table-container">
+                        <table className="screening-table">
+                          <thead>
+                            <tr>
+                              <th>Name</th>
+                              <th>Account</th>
+                              <th>Status</th>
+                              <th style={{ textAlign: 'right' }}>Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {complianceRegistry.map(c => (
+                              <tr key={c.address} className="table-row">
+                                <td style={{ fontFamily: 'var(--font-sans)', fontWeight: '500', color: '#fff' }}>{c.label}</td>
+                                <td style={{ color: 'var(--text-muted)' }}>{c.address}</td>
+                                <td>
+                                  <span className={`badge ${c.isBlocklisted ? 'badge-red' : 'badge-green'}`}>
+                                    {c.isBlocklisted ? '⚠️ Blocked' : '✓ Trusted'}
+                                  </span>
+                                </td>
+                                <td style={{ textAlign: 'right' }}>
+                                  <button
+                                    onClick={() => toggleBlocklist(c.address)}
+                                    className={`toggle-block-btn ${c.isBlocklisted ? 'btn-toggle-compliant' : 'btn-toggle-block'}`}
+                                  >
+                                    {c.isBlocklisted ? 'Unblock' : 'Block'}
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right column */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                    {/* Add screening target */}
+                    <div className="glass-panel">
+                      <div>
+                        <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Add a Recipient</h3>
+                        <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>Save a new account to your address book.</p>
+                      </div>
+
+                      <form onSubmit={handleCreateComplianceAddress} className="form-container">
+                        <div className="form-group">
+                          <label>Name</label>
+                          <input 
+                            type="text" 
+                            value={customCompLabel}
+                            onChange={e => setCustomCompLabel(e.target.value)}
+                            placeholder="e.g. Q4 Contractor Core"
+                            className="form-input" 
+                            required
+                          />
+                        </div>
+
+                        <div className="form-group">
+                          <label>Account Address</label>
+                          <input 
+                            type="text" 
+                            value={customCompAddress}
+                            onChange={e => setCustomCompAddress(e.target.value)}
+                            placeholder="0x..."
+                            className="form-input" 
+                            style={{ fontFamily: 'var(--font-mono)' }}
+                            required
+                          />
+                        </div>
+
+                        <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
+                          Save Recipient
+                        </button>
+                      </form>
+                    </div>
+
+                    {/* Compliance Oracle Settings */}
+                    <div className="glass-panel">
+                      <div>
+                        <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Compliance Oracle</h3>
+                        <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                          Configure the on-chain Compliance Oracle address.
+                        </p>
+                      </div>
+                      
+                      <div style={{ fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                        Current Oracle: <span style={{ color: 'var(--accent-pink)', wordBreak: 'break-all' }}>{oracleAddress || 'None (Using local blocklist only)'}</span>
+                      </div>
+
+                      <form onSubmit={handleUpdateOracleAddress} className="form-container">
+                        <div className="form-group">
+                          <label>New Oracle Address</label>
+                          <input 
+                            type="text" 
+                            value={newOracleAddress}
+                            onChange={e => setNewOracleAddress(e.target.value)}
+                            placeholder="0x..."
+                            className="form-input" 
+                            style={{ fontFamily: 'var(--font-mono)' }}
+                            required
+                          />
+                        </div>
+
+                        <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
+                          Set Compliance Oracle
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+
+                </div>
+              )}
+
+              {complianceSubTab === 'risk-assessment' && (
+                <div className="compliance-tab-grid">
+                  
+                  {/* Left Column: Screened List & Check Form */}
+                  <div className="compliance-list">
+                    {/* Run manual check panel */}
+                    <div className="glass-panel">
+                      <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>Run AML Risk Screening</h3>
+                      <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                        Instantly query Circle Compliance API to verify politically exposed persons (PEP), AML risk indices, and sanction list statuses.
+                      </p>
+                      <form onSubmit={handleManualRiskCheck} className="form-container" style={{ flexDirection: 'row', gap: '0.75rem', alignItems: 'flex-end' }}>
+                        <div className="form-group" style={{ flex: 1 }}>
+                          <label>EVM Address</label>
+                          <input 
+                            type="text"
+                            value={manualRiskAddress}
+                            onChange={e => setManualRiskAddress(e.target.value)}
+                            placeholder="0x..."
+                            className="form-input"
+                            style={{ fontFamily: 'var(--font-mono)' }}
+                            required
+                          />
+                        </div>
+                        <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.75rem 1rem', width: 'auto', whiteSpace: 'nowrap' }}>
+                          Scan Profile
+                        </button>
+                      </form>
+                    </div>
+
+                    {/* Profiles history list */}
+                    <div className="glass-panel" style={{ marginTop: '1rem' }}>
+                      <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>Screening Records</h3>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '350px', overflowY: 'auto' }}>
+                        {riskProfiles.map(p => (
+                          <div 
+                            key={p.address}
+                            onClick={() => setSelectedRiskProfile(p.address)}
+                            style={{ 
+                              padding: '0.75rem', 
+                              borderRadius: '6px', 
+                              border: `1px solid ${selectedRiskProfile === p.address ? 'var(--accent-pink)' : 'rgba(255,255,255,0.03)'}`,
+                              background: selectedRiskProfile === p.address ? 'rgba(251,200,216,0.03)' : '#0d0a10',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center'
+                            }}
+                          >
+                            <div>
+                              <div style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: '#fff', wordBreak: 'break-all' }}>{p.address}</div>
+                              <div style={{ fontSize: '0.6rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>Screened: {p.lastScreened}</div>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.25rem' }}>
+                              <span className={`badge ${p.decision === 'APPROVED' ? 'badge-green' : 'badge-red'}`} style={{ fontSize: '0.55rem' }}>
+                                {p.decision}
+                              </span>
+                              <span style={{ fontSize: '0.65rem', fontFamily: 'var(--font-mono)', color: p.riskScore > 50 ? 'var(--accent-red)' : 'var(--text-secondary)' }}>
+                                Score: {p.riskScore}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Detailed Scorecard Report */}
+                  <div className="glass-panel">
+                    {(() => {
+                      const profile = riskProfiles.find(p => p.address === selectedRiskProfile);
+                      if (!profile) return <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textAlign: 'center', padding: '2rem' }}>Select a screening profile to view the audit scorecard.</div>;
+                      
+                      return (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '0.75rem' }}>
+                            <span style={{ fontSize: '0.55rem', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Circle compliance API Scorecard</span>
+                            <h3 style={{ fontSize: '0.9rem', fontFamily: 'var(--font-mono)', color: '#fff', wordBreak: 'break-all', marginTop: '0.25rem' }}>{profile.address}</h3>
+                            <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Audit timestamp: {profile.lastScreened}</div>
+                          </div>
+
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                              <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>Screening Result:</span>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginTop: '0.15rem' }}>
+                                <span className={`badge ${profile.decision === 'APPROVED' ? 'badge-green' : 'badge-red'}`} style={{ fontSize: '0.72rem', padding: '0.35rem 0.65rem' }}>
+                                  {profile.decision === 'APPROVED' ? '✓ APPROVED' : '⚠️ DENIED'}
+                                </span>
+                              </div>
+                            </div>
+                            <div style={{ textAlign: 'right' }}>
+                              <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>AML Risk Score:</span>
+                              <div style={{ fontSize: '1.25rem', fontFamily: 'var(--font-mono)', fontWeight: 'bold', color: profile.riskScore > 50 ? 'var(--accent-red)' : 'var(--accent-green)', marginTop: '0.15rem' }}>
+                                {profile.riskScore} <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>/ 100</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Risk Score Meter */}
+                          <div>
+                            <div className="progress-bar-bg" style={{ height: '8px', borderRadius: '4px' }}>
+                              <div 
+                                style={{ 
+                                  width: `${profile.riskScore}%`, 
+                                  background: profile.riskScore > 50 
+                                    ? 'linear-gradient(90deg, #fbc8d8, #e57373)' 
+                                    : 'linear-gradient(90deg, #81c784, #4caf50)',
+                                  height: '100%' 
+                                }}
+                              />
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.55rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                              <span>LOW RISK</span>
+                              <span>HIGH RISK</span>
+                            </div>
+                          </div>
+
+                          {/* Specific flags details */}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', background: '#08060a', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.7rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Politically Exposed Person (PEP) Status:</span>
+                              <span className={`badge ${profile.pepFlag ? 'badge-red' : 'badge-green'}`} style={{ fontSize: '0.55rem' }}>
+                                {profile.pepFlag ? 'MATCH FOUND' : 'CLEAR'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.7rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Sanctions List (OFAC):</span>
+                              <span className={`badge ${profile.sanctionedJurisdiction !== 'None' ? 'badge-red' : 'badge-green'}`} style={{ fontSize: '0.55rem' }}>
+                                {profile.sanctionedJurisdiction !== 'None' ? `MATCHED: ${profile.sanctionedJurisdiction}` : 'CLEAR'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.7rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>AML Correlation Index:</span>
+                              <span className={`badge ${profile.amlFlag ? 'badge-red' : 'badge-green'}`} style={{ fontSize: '0.55rem' }}>
+                                {profile.amlFlag ? 'ALERT' : 'CLEAR'}
+                              </span>
+                            </div>
+                          </div>
+
+                          {profile.riskCategories.length > 0 && (
+                            <div>
+                              <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>Risk Categories:</span>
+                              <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap', marginTop: '0.25rem' }}>
+                                {profile.riskCategories.map(cat => (
+                                  <span key={cat} className="badge badge-purple" style={{ fontSize: '0.55rem' }}>{cat}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div>
+                            <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>Decision Factors:</span>
+                            <ul style={{ margin: '0.25rem 0 0 0', paddingLeft: '1rem', fontSize: '0.68rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                              {profile.reasons.map((r, i) => (
+                                <li key={i}>{r}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                </div>
+              )}
+
+            </div>
+          )}
+
+          {/* TAB 6: ERC-8004 AGENT REGISTRY & CONSOLE */}
+          {activeTab === 'agents' && (
             <div className="compliance-tab-grid">
               
-              {/* Compliance list */}
+              {/* Left Column: Registered Agents List */}
               <div className="compliance-list">
                 <div className="glass-panel">
-                  <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>Trusted Recipients</h3>
+                  <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>
+                    ERC-8004 AI Agent Registry
+                  </h3>
                   <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
-                    Before any payment goes out, we check that the recipient is safe. You can manage your trust list here.
+                    ATO verifies the identity, cryptographic credentials, and reputation scores of autonomous treasury agents on-chain.
                   </p>
 
-                  <div className="screening-table-container">
+                  <div className="screening-table-container" style={{ marginTop: '1rem' }}>
                     <table className="screening-table">
                       <thead>
                         <tr>
-                          <th>Name</th>
-                          <th>Account</th>
+                          <th>Agent / Role</th>
+                          <th>EVM Address</th>
+                          <th>ID</th>
+                          <th>Reputation</th>
+                          <th>Metadata (URI)</th>
                           <th>Status</th>
-                          <th style={{ textAlign: 'right' }}>Action</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {complianceRegistry.map(c => (
-                          <tr key={c.address} className="table-row">
-                            <td style={{ fontFamily: 'var(--font-sans)', fontWeight: '500', color: '#fff' }}>{c.label}</td>
-                            <td style={{ color: 'var(--text-muted)' }}>{c.address}</td>
+                        {agentsList.map(agent => (
+                          <tr key={agent.address} className="table-row">
                             <td>
-                              <span className={`badge ${c.isBlocklisted ? 'badge-red' : 'badge-green'}`}>
-                                {c.isBlocklisted ? '⚠️ Blocked' : '✓ Trusted'}
-                              </span>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <div style={{ 
+                                  width: '8px', 
+                                  height: '8px', 
+                                  borderRadius: '50%', 
+                                  backgroundColor: agent.role.includes('Allocator') ? 'var(--accent-cyan)' : agent.role.includes('Risk') ? 'var(--accent-pink)' : 'var(--accent-purple)'
+                                }}></div>
+                                <strong style={{ color: '#fff', fontSize: '0.72rem' }}>{agent.role}</strong>
+                              </div>
                             </td>
-                            <td style={{ textAlign: 'right' }}>
-                              <button
-                                onClick={() => toggleBlocklist(c.address)}
-                                className={`toggle-block-btn ${c.isBlocklisted ? 'btn-toggle-compliant' : 'btn-toggle-block'}`}
-                              >
-                                {c.isBlocklisted ? 'Unblock' : 'Block'}
-                              </button>
+                            <td style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}>
+                              {agent.address}
+                            </td>
+                            <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
+                              {agent.id}
+                            </td>
+                            <td>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 'bold', color: agent.reputation >= 90 ? 'var(--accent-green)' : 'var(--accent-pink)' }}>
+                                  {agent.reputation}
+                                </span>
+                                <div className="progress-bar-bg" style={{ width: '40px', height: '4px', borderRadius: '2px', display: 'inline-block' }}>
+                                  <div style={{ width: `${agent.reputation}%`, height: '100%', backgroundColor: agent.reputation >= 90 ? 'var(--accent-green)' : 'var(--accent-pink)' }}></div>
+                                </div>
+                              </div>
+                            </td>
+                            <td>
+                              {agent.uri ? (
+                                <a 
+                                  href={agent.uri.replace('ipfs://', 'https://ipfs.io/ipfs/')} 
+                                  target="_blank" 
+                                  rel="noreferrer" 
+                                  style={{ textDecoration: 'underline', color: 'var(--accent-pink)', fontSize: '0.65rem' }}
+                                >
+                                  View Spec ↗
+                                </a>
+                              ) : (
+                                <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem' }}>None</span>
+                              )}
+                            </td>
+                            <td>
+                              <span className={`badge ${agent.isRegistered ? 'badge-green' : 'badge-red'}`} style={{ fontSize: '0.55rem' }}>
+                                {agent.isRegistered ? '✓ Certified' : '⚠️ Unregistered'}
+                              </span>
                             </td>
                           </tr>
                         ))}
@@ -1817,107 +2543,161 @@ export default function App() {
                     </table>
                   </div>
                 </div>
-              </div>
 
-              {/* Add screening target */}
-              <div className="glass-panel">
-                <div>
-                  <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Add a Recipient</h3>
-                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>Save a new account to your address book.</p>
+                {/* Built-in Safety Features / Logs summary */}
+                <div className="glass-panel" style={{ marginTop: '1rem' }}>
+                  <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.75rem' }}>
+                    Agent Cryptographic Identity Protocol (ERC-8004)
+                  </h3>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.5rem' }}>
+                    <p>
+                      <strong>1. Signature Verification:</strong> When the Allocator Agent submits a direct payout execution transaction, the vault contract uses the <code>recoverSigner</code> engine to cryptographically recover the agent's signature on-chain. This prevents script injection and unauthorized transactions.
+                    </p>
+                    <p>
+                      <strong>2. Replay Protection:</strong> An on-chain mapping tracks sequential transaction nonces for each registered agent. Expired, out-of-order, or forged signatures are automatically rejected by the treasury vault.
+                    </p>
+                    <p>
+                      <strong>3. Dynamic Trust & Reputation:</strong> If an agent behaves maliciously or fails off-chain compliance rules, the administrator can dynamically lower the agent's reputation score or unregister the agent entirely via the registry contract, instantly revoking execution rights.
+                    </p>
+                  </div>
                 </div>
-
-                <form onSubmit={handleCreateComplianceAddress} className="form-container">
-                  <div className="form-group">
-                    <label>Name</label>
-                    <input 
-                      type="text" 
-                      value={customCompLabel}
-                      onChange={e => setCustomCompLabel(e.target.value)}
-                      placeholder="e.g. Q4 Contractor Core"
-                      className="form-input" 
-                      required
-                    />
-                  </div>
-
-                  <div className="form-group">
-                    <label>Account Address</label>
-                    <input 
-                      type="text" 
-                      value={customCompAddress}
-                      onChange={e => setCustomCompAddress(e.target.value)}
-                      placeholder="0x..."
-                      className="form-input" 
-                      style={{ fontFamily: 'var(--font-mono)' }}
-                      required
-                    />
-                  </div>
-
-                  <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
-                    Save Recipient
-                  </button>
-                </form>
               </div>
 
-            </div>
-          )}
-
-          {/* TAB 6: AGENTS AND ARCHITECTURE LOGS */}
-          {activeTab === 'agents' && (
-            <div className="agents-tab-layout">
-              <div className="glass-panel">
-                <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>How ATO Protects Your Money</h3>
-                <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
-                  Every payment goes through three automated checks before it's sent. Here's what happens behind the scenes.
-                </p>
-
-                <div className="agents-grid">
+              {/* Right Column: Registry Management */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                
+                {/* Registry Address Setting */}
+                <div className="glass-panel">
+                  <div>
+                    <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Agent Registry Configuration</h3>
+                    <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                      Link the treasury vault to the ERC-8004 Registry address.
+                    </p>
+                  </div>
                   
-                  <div className="agent-card-item">
-                    <div className="agent-card-title">
-                      <div className="agent-card-dot" style={{ backgroundColor: 'var(--accent-purple)' }}></div>
-                      <span>Step 1: Balance Verification</span>
-                    </div>
-                    <p className="agent-desc">
-                      Before any payment is sent, the system checks that your account has enough funds. It also verifies that all the payment details are correct and creates an audit trail automatically.
-                    </p>
+                  <div style={{ fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', margin: '0.5rem 0' }}>
+                    Current Address: <span style={{ color: 'var(--accent-pink)', wordBreak: 'break-all' }}>{registryAddress || 'None (Using local checks)'}</span>
                   </div>
 
-                  <div className="agent-card-item">
-                    <div className="agent-card-title">
-                      <div className="agent-card-dot" style={{ backgroundColor: 'var(--accent-pink)' }}></div>
-                      <span>Step 2: Recipient Safety Check</span>
+                  <form onSubmit={handleUpdateRegistryAddress} className="form-container">
+                    <div className="form-group">
+                      <label>New Registry Address</label>
+                      <input 
+                        type="text" 
+                        value={newRegistryAddress}
+                        onChange={e => setNewRegistryAddress(e.target.value)}
+                        placeholder="0x..."
+                        className="form-input" 
+                        style={{ fontFamily: 'var(--font-mono)' }}
+                        required
+                      />
                     </div>
-                    <p className="agent-desc">
-                      We verify that the recipient's account is safe to send money to. If the account has been flagged for any reason, the payment is automatically stopped to protect your funds.
-                    </p>
-                  </div>
 
-                  <div className="agent-card-item">
-                    <div className="agent-card-title">
-                      <div className="agent-card-dot" style={{ backgroundColor: 'var(--accent-cyan)' }}></div>
-                      <span>Step 3: Instant Delivery</span>
-                    </div>
-                    <p className="agent-desc">
-                      Once verified, the payment is processed and delivered instantly. The system handles all currency conversions and fee calculations automatically — you just see the final result.
-                    </p>
-                  </div>
-
+                    <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
+                      Set Agent Registry
+                    </button>
+                  </form>
                 </div>
 
-                <div className="divider" style={{ margin: '1rem 0' }}></div>
+                {/* Register New Agent */}
+                <div className="glass-panel">
+                  <div>
+                    <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Register New Agent</h3>
+                    <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                      Authorize and index a new AI agent inside the ERC-8004 registry.
+                    </p>
+                  </div>
 
-                <div className="debug-box">
-                  <h4 style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--accent-pink)', marginBottom: '0.25rem' }}>
-                    Built-in Safety Features
-                  </h4>
-                  <p>
-                    <strong>1. Blocked recipient protection:</strong> If someone tries to send money to a flagged account, the system automatically cancels the payment before any funds leave your account. You'll never lose money to a bad transfer.
-                  </p>
-                  <p>
-                    <strong>2. Automatic fee handling:</strong> Transaction fees on this network are paid in USDC (the same currency you already use), so there's no need to hold a separate token. The system handles all the math automatically.
-                  </p>
+                  <form onSubmit={handleRegisterAgent} className="form-container">
+                    <div className="form-group">
+                      <label>Agent EVM Address</label>
+                      <input 
+                        type="text" 
+                        value={newAgentAddress}
+                        onChange={e => setNewAgentAddress(e.target.value)}
+                        placeholder="0x..."
+                        className="form-input" 
+                        style={{ fontFamily: 'var(--font-mono)' }}
+                        required
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>Metadata URI (IPFS)</label>
+                      <input 
+                        type="text" 
+                        value={newAgentURI}
+                        onChange={e => setNewAgentURI(e.target.value)}
+                        placeholder="ipfs://..."
+                        className="form-input" 
+                        style={{ fontFamily: 'var(--font-mono)' }}
+                        required
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>Initial Reputation Score (0 - 100)</label>
+                      <input 
+                        type="number" 
+                        value={newAgentReputation}
+                        onChange={e => setNewAgentReputation(e.target.value)}
+                        min="0"
+                        max="100"
+                        className="form-input" 
+                        required
+                      />
+                    </div>
+
+                    <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
+                      Register Agent
+                    </button>
+                  </form>
                 </div>
+
+                {/* Update Reputation Score */}
+                <div className="glass-panel">
+                  <div>
+                    <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Update Reputation</h3>
+                    <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                      Adjust the trust score of an active agent.
+                    </p>
+                  </div>
+
+                  <form onSubmit={handleUpdateReputation} className="form-container">
+                    <div className="form-group">
+                      <label>Agent EVM Address</label>
+                      <input 
+                        type="text" 
+                        value={updateRepAgentAddress}
+                        onChange={e => setUpdateRepAgentAddress(e.target.value)}
+                        placeholder="0x..."
+                        className="form-input" 
+                        style={{ fontFamily: 'var(--font-mono)' }}
+                        required
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>New Reputation Score (0 - 100)</label>
+                      <input 
+                        type="number" 
+                        value={updateRepScore}
+                        onChange={e => setUpdateRepScore(e.target.value)}
+                        min="0"
+                        max="100"
+                        className="form-input" 
+                        required
+                      />
+                    </div>
+
+                    <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
+                      Update Reputation
+                    </button>
+                  </form>
+                </div>
+
               </div>
+
             </div>
           )}
 
