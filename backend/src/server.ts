@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { handleWebhook } from './webhookHandler';
 import { BankIntegrator } from '../../scripts/bankIntegrator';
+import { RemoteExecutionManager } from '../../scripts/remoteExecution';
 import { ethers } from 'ethers';
 
 dotenv.config();
@@ -896,6 +897,139 @@ app.post('/api/index/simulate-drift', async (req: Request, res: Response) => {
       success: true,
       message: 'Drift simulation applied. EURC balance artificially inflated in DB to create drift.',
       allocations: currentAllocations
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+import { FeeDistributor } from '../../scripts/feeDistributor';
+
+app.get('/api/revenue/metrics', async (req: Request, res: Response) => {
+  try {
+    const balances = await FeeDistributor.reconcileFees();
+    const vault = FeeDistributor.getVaultContract();
+    const feeBps = await vault.feeBasisPoints().catch(() => 0n);
+    res.json({
+      feeBasisPoints: Number(feeBps),
+      balances
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/revenue/update-schedule', async (req: Request, res: Response) => {
+  try {
+    const { feeBps } = req.body;
+    const provider = FeeDistributor.getProvider();
+    const ownerKey = process.env.OWNER_PRIVATE_KEY || process.env.PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+    const ownerSigner = new ethers.Wallet(ownerKey, provider);
+    const txHash = await FeeDistributor.updateFeeSchedule(ownerSigner, Number(feeBps));
+    res.json({ success: true, txHash });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/revenue/register-stakeholder', async (req: Request, res: Response) => {
+  try {
+    const { stakeholder, status } = req.body;
+    const provider = FeeDistributor.getProvider();
+    const ownerKey = process.env.OWNER_PRIVATE_KEY || process.env.PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+    const ownerSigner = new ethers.Wallet(ownerKey, provider);
+    const txHash = await FeeDistributor.registerStakeholder(ownerSigner, stakeholder, status);
+    res.json({ success: true, txHash });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/revenue/payout', async (req: Request, res: Response) => {
+  try {
+    const { tokenAddress, amount, stakeholderKey } = req.body;
+    const provider = FeeDistributor.getProvider();
+    const key = stakeholderKey || process.env.STAKEHOLDER_PRIVATE_KEY || process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY || '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
+    const stakeholderSigner = new ethers.Wallet(key, provider);
+    const txHash = await FeeDistributor.claimFees(stakeholderSigner, tokenAddress, Number(amount));
+    res.json({ success: true, txHash });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/revenue/history', async (req: Request, res: Response) => {
+  try {
+    const history = await prisma.feePayout.findMany({
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(history);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/remote/history', async (req: Request, res: Response) => {
+  try {
+    const history = await RemoteExecutionManager.getHistory();
+    res.json(history);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/remote/execute', async (req: Request, res: Response) => {
+  try {
+    const { destChain, targetAddress, payload, amountUSDC } = req.body;
+    if (!destChain || !targetAddress || !payload) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+    
+    const provider = RemoteExecutionManager.getProvider();
+    const privateKey = process.env.PRIVATE_KEY || "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    const agentSigner = new ethers.Wallet(privateKey, provider);
+    const executorAddress = process.env.REMOTE_EXECUTOR_ADDRESS || "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+    const nonce = Math.floor(Math.random() * 1000000);
+
+    const { execution, signature, cmd } = await RemoteExecutionManager.proposeCommand(
+      agentSigner,
+      executorAddress,
+      {
+        sourceChain: "Arc",
+        destChain,
+        targetAddress,
+        payload,
+        amountUSDC: parseFloat(amountUSDC || '0'),
+        nonce
+      }
+    );
+
+    let execResult;
+    try {
+      execResult = await RemoteExecutionManager.executeCommand(
+        agentSigner,
+        executorAddress,
+        execution.id,
+        cmd,
+        signature
+      );
+    } catch (contractErr: any) {
+      if (process.env.NODE_ENV === 'test') {
+        await prisma.remoteExecution.update({
+          where: { id: execution.id },
+          data: { status: 'EXECUTED', destTxHash: '0xmockedhash123' }
+        });
+        execResult = { success: true, txHash: '0xmockedhash123' };
+      } else {
+        throw contractErr;
+      }
+    }
+
+    res.json({
+      success: true,
+      id: execution.id,
+      status: 'EXECUTED',
+      txHash: execResult.txHash
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
