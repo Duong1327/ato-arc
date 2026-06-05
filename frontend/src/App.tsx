@@ -8,10 +8,19 @@ import {
   useDeployContract, 
   useWaitForTransactionReceipt, 
   usePublicClient,
-  useSwitchChain
+  useSwitchChain,
+  useSignMessage
 } from 'wagmi';
-import { parseUnits, formatUnits, isAddress, keccak256, stringToHex } from 'viem';
+import { parseUnits, formatUnits, isAddress, keccak256, stringToHex, encodePacked } from 'viem';
 import { ATO_VAULT_ABI, ATO_VAULT_BYTECODE, ERC8183_JOB_ABI, ERC8004_REGISTRY_ABI } from './contractBytecode';
+import {
+  PremiumButton,
+  SkeletonCard,
+  SkeletonTable,
+  PageTransitionWrapper,
+  SearchFilterLoader
+} from './LoadingComponents';
+
 
 // --- TS INTERFACES ---
 interface Milestone {
@@ -115,9 +124,10 @@ export default function App() {
   const publicClient = usePublicClient();
   const { address: connectedAddress, isConnected, chainId } = useAccount();
   const { switchChain } = useSwitchChain();
+  const { signMessageAsync } = useSignMessage();
 
   const [vaultAddress, setVaultAddress] = useState<string>(() => {
-    return localStorage.getItem('ato_vault_address') || '0x0c392a7A89F26253ee17a650a107e123f0966125';
+    return localStorage.getItem('ato_vault_address') || '0xa5538A45A926Da4a2b16ce12c7F6e1480Fd48700';
   });
   const [vaultAddressInput, setVaultAddressInput] = useState<string>('');
 
@@ -130,7 +140,17 @@ export default function App() {
   }, [vaultAddress]);
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing' | 'webhooks' | 'banking' | 'guardrails' | 'index' | 'revenue' | 'remote'>('dashboard');
-
+  const [approvingProposalId, setApprovingProposalId] = useState<number | null>(null);
+  const [executingProposalId, setExecutingProposalId] = useState<number | null>(null);
+  const [rebalancingIndex, setRebalancingIndex] = useState<boolean>(false);
+  const [proposingIndex, setProposingIndex] = useState<boolean>(false);
+  const [submittingMilestoneActionId, setSubmittingMilestoneActionId] = useState<number | null>(null);
+  const [proposingMultisig, setProposingMultisig] = useState<boolean>(false);
+  const [isDeployingMilestone, setIsDeployingMilestone] = useState<boolean>(false);
+  const [milestonesLoading, setMilestonesLoading] = useState<boolean>(false);
+  const [proposalsLoading, setProposalsLoading] = useState<boolean>(false);
+  const [indexLoading, setIndexLoading] = useState<boolean>(false);
+  const [bridgeLogsLoading, setBridgeLogsLoading] = useState<boolean>(false);
   // --- REVENUE & FEE ALLOCATION ENGINE STATES ---
   const [feeBasisPoints, setFeeBasisPoints] = useState<number>(0);
   const [feeBalances, setFeeBalances] = useState<Array<{
@@ -332,6 +352,8 @@ export default function App() {
   const [activeOwnerVerified, setActiveOwnerVerified] = useState(false);
   const [withdrawalLimit] = useState<number>(50000);
   const [multiSigApproved, setMultiSigApproved] = useState(false);
+  const [depositAmount, setDepositAmount] = useState<string>('');
+  const [depositLoading, setDepositLoading] = useState<boolean>(false);
 
   // Circle Gas Station / Paymaster State
   const [paymasterStatus, setPaymasterStatus] = useState<'ACTIVE' | 'DEPLETED'>('ACTIVE');
@@ -378,6 +400,7 @@ export default function App() {
   const [allocationsError, setAllocationsError] = useState<string>('');
 
   const fetchIndexData = async () => {
+    setIndexLoading(true);
     try {
       const resAlloc = await fetch('http://localhost:3001/api/index/allocations');
       if (resAlloc.ok) {
@@ -398,6 +421,8 @@ export default function App() {
       }
     } catch (err: any) {
       setAllocationsError(err.message || 'Error fetching index data');
+    } finally {
+      setIndexLoading(false);
     }
   };
 
@@ -411,6 +436,7 @@ export default function App() {
 
   const submitTargetWeights = async (e: React.FormEvent) => {
     e.preventDefault();
+    setProposingIndex(true);
     try {
       const res = await fetch('http://localhost:3001/api/index/proposal', {
         method: 'POST',
@@ -428,10 +454,13 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Propose target weights failed:', err);
+    } finally {
+      setProposingIndex(false);
     }
   };
 
   const approveIndexProposal = async (approver: string) => {
+    setProposingIndex(true);
     try {
       const res = await fetch('http://localhost:3001/api/index/proposal/approve', {
         method: 'POST',
@@ -443,10 +472,13 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Approve index proposal failed:', err);
+    } finally {
+      setProposingIndex(false);
     }
   };
 
   const triggerAutoRebalance = async () => {
+    setRebalancingIndex(true);
     try {
       const res = await fetch('http://localhost:3001/api/index/rebalance', { method: 'POST' });
       if (res.ok) {
@@ -454,10 +486,13 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Rebalance trigger failed:', err);
+    } finally {
+      setRebalancingIndex(false);
     }
   };
 
   const simulateIndexDrift = async () => {
+    setRebalancingIndex(true);
     try {
       const res = await fetch('http://localhost:3001/api/index/simulate-drift', { method: 'POST' });
       if (res.ok) {
@@ -465,6 +500,8 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Simulate drift failed:', err);
+    } finally {
+      setRebalancingIndex(false);
     }
   };
 
@@ -640,6 +677,7 @@ export default function App() {
   };
 
   const fetchBridgeLogs = async () => {
+    setBridgeLogsLoading(true);
     try {
       const res = await fetch('http://localhost:3001/api/yield/bridge-logs');
       if (res.ok) {
@@ -648,6 +686,8 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to fetch bridge logs:', err);
+    } finally {
+      setBridgeLogsLoading(false);
     }
   };
 
@@ -889,6 +929,8 @@ export default function App() {
   const [newOracleAddress, setNewOracleAddress] = useState<string>('');
 
   const [complianceSubTab, setComplianceSubTab] = useState<'registry' | 'risk-assessment'>('registry');
+  const [complianceSearch, setComplianceSearch] = useState<string>('');
+  const [complianceSearchLoading, setComplianceSearchLoading] = useState<boolean>(false);
 
   interface RiskProfile {
     address: string;
@@ -1270,58 +1312,66 @@ export default function App() {
 
   // Load custom milestones dynamically from the blockchain if a vault is loaded!
   const fetchAllOnChainMilestones = async () => {
-    if (!isConnected || !vaultAddress || !isAddress(vaultAddress) || !milestoneCountVal || !publicClient) return;
-    const count = Number(milestoneCountVal);
-    const list: Milestone[] = [];
-    addLog('SYSTEM', `Syncing ${count} milestones from custom vault ${vaultAddress}...`, 'INFO');
-
-    for (let i = 1; i <= count; i++) {
-      try {
-        const m = await publicClient.readContract({
-          address: vaultAddress as `0x${string}`,
-          abi: ATO_VAULT_ABI,
-          functionName: 'milestones',
-          args: [BigInt(i)]
-        }) as any;
-
-        let jobStatus = 1; // Default to FUNDED
-        let jobDeliverableHash = '0x0000000000000000000000000000000000000000000000000000000000000000';
-        const jobContractAddress = m[6];
-
-        if (jobContractAddress && jobContractAddress !== '0x0000000000000000000000000000000000000000') {
-          try {
-            const jobData = await publicClient.readContract({
-              address: jobContractAddress as `0x${string}`,
-              abi: ERC8183_JOB_ABI,
-              functionName: 'jobs',
-              args: [BigInt(1)]
-            }) as any;
-            jobStatus = Number(jobData[6]);
-            jobDeliverableHash = jobData[7];
-          } catch (jobErr) {
-            console.error(`Error reading job contract for milestone ${i}:`, jobErr);
-          }
-        }
-
-        list.push({
-          id: i,
-          name: m[0],
-          allocatedERC20: Number(m[1]) / 1e6,
-          spentERC20: Number(m[2]) / 1e6,
-          timeDeadline: new Date(Number(m[3]) * 1000).toISOString().split('T')[0],
-          isActive: m[4],
-          jobContractAddress: m[6],
-          provider: m[7],
-          evaluator: m[8],
-          jobStatus,
-          jobDeliverableHash
-        });
-      } catch (err) {
-        console.error(`Error reading milestone ${i}:`, err);
-      }
+    if (!isConnected || !vaultAddress || !isAddress(vaultAddress) || !publicClient) return;
+    if (milestoneCountVal === undefined || Number(milestoneCountVal) === 0) {
+      setMilestones([]);
+      setMilestonesLoading(false);
+      return;
     }
-    setMilestones(list);
-    addLog('SYSTEM', 'On-chain milestone allocations synchronized successfully.', 'SUCCESS');
+    setMilestonesLoading(true);
+    try {
+      const count = Number(milestoneCountVal);
+      const list: Milestone[] = [];
+      addLog('SYSTEM', `Syncing ${count} milestones from custom vault ${vaultAddress}...`, 'INFO');
+
+      for (let i = 1; i <= count; i++) {
+        try {
+          const m = await publicClient.readContract({
+            address: vaultAddress as `0x${string}`,
+            abi: ATO_VAULT_ABI,
+            functionName: 'milestones',
+            args: [BigInt(i)]
+          }) as any;
+
+          let jobStatus = 1; // Default to FUNDED
+          let jobDeliverableHash = '0x';
+          if (m[6] !== '0x0000000000000000000000000000000000000000') {
+            try {
+              const jobData = await publicClient.readContract({
+                address: m[6],
+                abi: ERC8183_JOB_ABI,
+                functionName: 'jobs',
+                args: [BigInt(1)]
+              }) as any;
+              jobStatus = Number(jobData[6]);
+              jobDeliverableHash = jobData[7];
+            } catch (jobErr) {
+              console.error(`Error reading job contract for milestone ${i}:`, jobErr);
+            }
+          }
+
+          list.push({
+            id: i,
+            name: m[0],
+            allocatedERC20: Number(m[1]) / 1e6,
+            spentERC20: Number(m[2]) / 1e6,
+            timeDeadline: new Date(Number(m[3]) * 1000).toISOString().split('T')[0],
+            isActive: m[4],
+            jobContractAddress: m[6],
+            provider: m[7],
+            evaluator: m[8],
+            jobStatus,
+            jobDeliverableHash
+          });
+        } catch (err) {
+          console.error(`Error reading milestone ${i}:`, err);
+        }
+      }
+      setMilestones(list);
+      addLog('SYSTEM', 'On-chain milestone allocations synchronized successfully.', 'SUCCESS');
+    } finally {
+      setMilestonesLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -1353,42 +1403,47 @@ export default function App() {
     if (!isConnected || !vaultAddress || !isAddress(vaultAddress) || !proposalCountVal || !publicClient || !connectedAddress) return;
 
     const fetchAllOnChainProposals = async () => {
-      const count = Number(proposalCountVal);
-      const list: Proposal[] = [];
-      addLog('SYSTEM', `Syncing ${count} multisig proposals from custom vault ${vaultAddress}...`, 'INFO');
+      setProposalsLoading(true);
+      try {
+        const count = Number(proposalCountVal);
+        const list: Proposal[] = [];
+        addLog('SYSTEM', `Syncing ${count} multisig proposals from custom vault ${vaultAddress}...`, 'INFO');
 
-      for (let i = 1; i <= count; i++) {
-        try {
-          const p = await publicClient.readContract({
-            address: vaultAddress as `0x${string}`,
-            abi: ATO_VAULT_ABI,
-            functionName: 'proposals',
-            args: [BigInt(i)]
-          });
-          // Struct: recipient, amountERC20, data, approvalCount, executed, isNativeGasTx
-          const hasApproved = await publicClient.readContract({
-            address: vaultAddress as `0x${string}`,
-            abi: ATO_VAULT_ABI,
-            functionName: 'hasApprovedProposal',
-            args: [BigInt(i), connectedAddress as `0x${string}`]
-          }) as boolean;
+        for (let i = 1; i <= count; i++) {
+          try {
+            const p = await publicClient.readContract({
+              address: vaultAddress as `0x${string}`,
+              abi: ATO_VAULT_ABI,
+              functionName: 'proposals',
+              args: [BigInt(i)]
+            });
+            // Struct: recipient, amountERC20, data, approvalCount, executed, isNativeGasTx
+            const hasApproved = await publicClient.readContract({
+              address: vaultAddress as `0x${string}`,
+              abi: ATO_VAULT_ABI,
+              functionName: 'hasApprovedProposal',
+              args: [BigInt(i), connectedAddress as `0x${string}`]
+            }) as boolean;
 
-          list.push({
-            id: i,
-            recipient: p[0],
-            amountERC20: Number(p[1]) / 1e6,
-            data: p[2],
-            approvalCount: Number(p[3]),
-            executed: p[4],
-            isNativeGasTx: p[5],
-            hasApproved
-          });
-        } catch (err) {
-          console.error(`Error reading proposal ${i}:`, err);
+            list.push({
+              id: i,
+              recipient: p[0],
+              amountERC20: Number(p[1]) / 1e6,
+              data: p[2],
+              approvalCount: Number(p[3]),
+              executed: p[4],
+              isNativeGasTx: p[5],
+              hasApproved
+            });
+          } catch (err) {
+            console.error(`Error reading proposal ${i}:`, err);
+          }
         }
+        setProposals(list);
+        addLog('SYSTEM', 'On-chain multisig proposals synchronized.', 'SUCCESS');
+      } finally {
+        setProposalsLoading(false);
       }
-      setProposals(list);
-      addLog('SYSTEM', 'On-chain multisig proposals synchronized.', 'SUCCESS');
     };
 
     fetchAllOnChainProposals();
@@ -1461,7 +1516,7 @@ export default function App() {
     }
   };
 
-  const triggerBiometricApproval = async (title: string, onSuccess: () => void) => {
+  const triggerBiometricApproval = async (title: string, onSuccess: () => void, onFailure?: () => void) => {
     setBiometricPromptTitle(title);
     setIsBiometricPromptOpen(true);
     setBiometricScanStatus('scanning');
@@ -1493,6 +1548,7 @@ export default function App() {
       addLog('SYSTEM', `Biometric verification failed: ${e.message || e}`, 'ERROR');
       await new Promise(r => setTimeout(r, 1000));
       setIsBiometricPromptOpen(false);
+      if (onFailure) onFailure();
     }
   };
 
@@ -1520,6 +1576,54 @@ export default function App() {
       bytecode: ATO_VAULT_BYTECODE as `0x${string}`,
       args: [[connectedAddress], 1n, 5000000000n] // 5000 USDC daily limit
     });
+  };
+
+  const handleDepositUSDC = async () => {
+    if (!depositAmount || !vaultAddress || !connectedAddress) {
+      alert("Please enter a deposit amount and connect your wallet.");
+      return;
+    }
+    const amt = parseFloat(depositAmount);
+    if (isNaN(amt) || amt <= 0) {
+      alert("Invalid deposit amount.");
+      return;
+    }
+
+    setDepositLoading(true);
+    try {
+      addLog('SYSTEM', `Initiating transfer of ${depositAmount} USDC to your vault at ${vaultAddress}...`, 'INFO');
+      const tokenUnits = parseUnits(depositAmount, 6);
+      
+      const tx = await writeContract({
+        address: '0x3600000000000000000000000000000000000000' as `0x${string}`,
+        abi: [
+          {
+            inputs: [
+              { name: 'recipient', type: 'address' },
+              { name: 'amount', type: 'uint256' }
+            ],
+            name: 'transfer',
+            outputs: [{ name: '', type: 'bool' }],
+            stateMutability: 'nonpayable',
+            type: 'function'
+          }
+        ] as const,
+        functionName: 'transfer',
+        args: [vaultAddress as `0x${string}`, tokenUnits]
+      });
+
+      addLog('SYSTEM', `Deposit transaction broadcasted! Tx Hash: ${tx}. Waiting for block confirmation...`, 'INFO');
+      if (publicClient) {
+        await publicClient.waitForTransactionReceipt({ hash: tx });
+        addLog('SYSTEM', `Deposit successfully confirmed on Arc L1! Vault Funded.`, 'SUCCESS');
+      }
+      setDepositAmount('');
+      refetchVaultBalances();
+    } catch (err: any) {
+      addLog('SYSTEM', `USDC deposit failed: ${err.message || err}`, 'ERROR');
+    } finally {
+      setDepositLoading(false);
+    }
   };
 
   const { writeContractAsync: writeContract } = useWriteContract();
@@ -2139,11 +2243,48 @@ export default function App() {
                 args: [BigInt(invoice.milestoneId), invoice.recipientAddress as `0x${string}`, erc20Units]
               });
             } else {
+              if (!publicClient) throw new Error("Public client not ready");
+              if (!connectedAddress) throw new Error("Wallet not connected");
+
+              // Fetch signer nonce from contract
+              const nonceVal = await publicClient.readContract({
+                address: vaultAddress as `0x${string}`,
+                abi: ATO_VAULT_ABI,
+                functionName: 'agentNonces',
+                args: [connectedAddress as `0x${string}`]
+              }) as bigint;
+
+              // Generate EIP-191 packed hash
+              const messageHash = keccak256(
+                encodePacked(
+                  ['address', 'uint256', 'uint256', 'address', 'uint256'],
+                  [
+                    invoice.recipientAddress as `0x${string}`,
+                    erc20Units,
+                    nonceVal,
+                    vaultAddress as `0x${string}`,
+                    BigInt(chainId || 5042002)
+                  ]
+                )
+              );
+
+              addLog('ALLOCATOR', `Requesting owner/agent biometric signature verification for direct treasury payout...`, 'INFO');
+
+              // Request connected wallet signature
+              const sig = await signMessageAsync({
+                message: { raw: messageHash }
+              });
+
               txHash = await writeContract({
                 address: vaultAddress as `0x${string}`,
                 abi: ATO_VAULT_ABI,
                 functionName: 'agentDirectPayoutERC20',
-                args: [invoice.recipientAddress as `0x${string}`, erc20Units]
+                args: [
+                  invoice.recipientAddress as `0x${string}`,
+                  erc20Units,
+                  nonceVal,
+                  sig
+                ]
               });
             }
             if (!publicClient) throw new Error("Public client not ready");
@@ -2218,84 +2359,99 @@ export default function App() {
     const budget = parseFloat(newMilestoneBudget);
     if (isNaN(budget) || budget <= 0) return;
 
+    setIsDeployingMilestone(true);
+
     const providerAddr = newMilestoneProvider || '0x1111111111111111111111111111111111111111';
     const evaluatorAddr = newMilestoneEvaluator || '0x2222222222222222222222222222222222222222';
 
     const executeCreate = async () => {
-      if (vaultAddress && isAddress(vaultAddress)) {
-        try {
-          addLog('SYSTEM', `Submitting new on-chain milestone with ERC-8183 Escrow...`, 'INFO');
-          const budgetUnits = parseUnits(newMilestoneBudget, 6);
-          const durationSec = BigInt(30 * 24 * 60 * 60); // standard 30-day duration
+      try {
+        if (vaultAddress && isAddress(vaultAddress)) {
+          try {
+            addLog('SYSTEM', `Submitting new on-chain milestone with ERC-8183 Escrow...`, 'INFO');
+            const budgetUnits = parseUnits(newMilestoneBudget, 6);
+            const durationSec = BigInt(30 * 24 * 60 * 60); // standard 30-day duration
 
-          if (passkeyAccount) {
-            await new Promise(r => setTimeout(r, 1200));
-            addLog('SYSTEM', `[Paymaster] Sponsored transaction via Circle Gas Station: gas fee ($0.00 USDC) paid by entity.`, 'SUCCESS');
-            addLog('SYSTEM', `[ERC-1271] Biometric signature verified on-chain.`, 'SUCCESS');
-            
-            const newM: Milestone = {
-              id: milestones.length + 1,
-              name: newMilestoneName,
-              allocatedERC20: budget,
-              spentERC20: 0,
-              timeDeadline: newMilestoneDeadline,
-              isActive: true,
-              jobContractAddress: '0x' + Array.from({length: 40}, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join(''),
-              provider: providerAddr,
-              evaluator: evaluatorAddr,
-              jobStatus: 1,
-              jobDeliverableHash: '0x0000000000000000000000000000000000000000000000000000000000000000'
-            };
-            setMilestones([...milestones, newM]);
-            addLog('SYSTEM', `Milestone created and ERC-8183 escrow contract deployed successfully!`, 'SUCCESS');
-          } else {
-            const tx = await writeContract({
-              address: vaultAddress as `0x${string}`,
-              abi: ATO_VAULT_ABI,
-              functionName: 'createMilestone',
-              args: [
-                newMilestoneName, 
-                budgetUnits, 
-                durationSec, 
-                providerAddr as `0x${string}`, 
-                evaluatorAddr as `0x${string}`
-              ]
-            });
-            addLog('SYSTEM', `Milestone created and ERC-8183 escrow contract deployed! Hash: ${tx}`, 'SUCCESS');
-            refetchMilestoneCount();
+            if (passkeyAccount) {
+              await new Promise(r => setTimeout(r, 1200));
+              addLog('SYSTEM', `[Paymaster] Sponsored transaction via Circle Gas Station: gas fee ($0.00 USDC) paid by entity.`, 'SUCCESS');
+              addLog('SYSTEM', `[ERC-1271] Biometric signature verified on-chain.`, 'SUCCESS');
+              
+              const newM: Milestone = {
+                id: milestones.length + 1,
+                name: newMilestoneName,
+                allocatedERC20: budget,
+                spentERC20: 0,
+                timeDeadline: newMilestoneDeadline,
+                isActive: true,
+                jobContractAddress: '0x' + Array.from({length: 40}, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join(''),
+                provider: providerAddr,
+                evaluator: evaluatorAddr,
+                jobStatus: 1,
+                jobDeliverableHash: '0x0000000000000000000000000000000000000000000000000000000000000000'
+              };
+              setMilestones([...milestones, newM]);
+              addLog('SYSTEM', `Milestone created and ERC-8183 escrow contract deployed successfully!`, 'SUCCESS');
+            } else {
+              const tx = await writeContract({
+                address: vaultAddress as `0x${string}`,
+                abi: ATO_VAULT_ABI,
+                functionName: 'createMilestone',
+                args: [
+                  newMilestoneName, 
+                  budgetUnits, 
+                  durationSec, 
+                  providerAddr as `0x${string}`, 
+                  evaluatorAddr as `0x${string}`
+                ]
+              });
+              addLog('SYSTEM', `Milestone transaction broadcasted! Hash: ${tx}. Waiting for confirmation...`, 'INFO');
+              if (publicClient) {
+                await publicClient.waitForTransactionReceipt({ hash: tx });
+                addLog('SYSTEM', `Milestone transaction confirmed!`, 'SUCCESS');
+              }
+              refetchMilestoneCount();
+            }
+          } catch (err: any) {
+            addLog('SYSTEM', `On-chain Milestone creation failed: ${err.message || err}`, 'ERROR');
           }
-        } catch (err: any) {
-          addLog('SYSTEM', `On-chain Milestone creation failed: ${err.message || err}`, 'ERROR');
+        } else {
+          // Sandbox fallback
+          await new Promise(r => setTimeout(r, 1200));
+          const newM: Milestone = {
+            id: milestones.length + 1,
+            name: newMilestoneName,
+            allocatedERC20: budget,
+            spentERC20: 0,
+            timeDeadline: newMilestoneDeadline,
+            isActive: true,
+            jobContractAddress: '0x3c847e090d1958b2a42e13cb81eb09f300000000',
+            provider: providerAddr,
+            evaluator: evaluatorAddr,
+            jobStatus: 1,
+            jobDeliverableHash: '0x0000000000000000000000000000000000000000000000000000000000000000'
+          };
+          setMilestones([...milestones, newM]);
+          addLog('SYSTEM', `Created new Corporate Milestone: "${newMilestoneName}" with budget ${budget.toLocaleString()} USDC.`, 'SUCCESS');
         }
-      } else {
-        // Sandbox fallback
-        const newM: Milestone = {
-          id: milestones.length + 1,
-          name: newMilestoneName,
-          allocatedERC20: budget,
-          spentERC20: 0,
-          timeDeadline: newMilestoneDeadline,
-          isActive: true,
-          jobContractAddress: '0x3c847e090d1958b2a42e13cb81eb09f300000000',
-          provider: providerAddr,
-          evaluator: evaluatorAddr,
-          jobStatus: 1,
-          jobDeliverableHash: '0x0000000000000000000000000000000000000000000000000000000000000000'
-        };
-        setMilestones([...milestones, newM]);
-        addLog('SYSTEM', `Created new Corporate Milestone: "${newMilestoneName}" with budget ${budget.toLocaleString()} USDC.`, 'SUCCESS');
-      }
 
-      // Reset inputs
-      setNewMilestoneName('');
-      setNewMilestoneBudget('');
-      setNewMilestoneDeadline('');
-      setNewMilestoneProvider('');
-      setNewMilestoneEvaluator('');
+        // Reset inputs
+        setNewMilestoneName('');
+        setNewMilestoneBudget('');
+        setNewMilestoneDeadline('');
+        setNewMilestoneProvider('');
+        setNewMilestoneEvaluator('');
+      } finally {
+        setIsDeployingMilestone(false);
+      }
     };
 
     if (passkeyAccount) {
-      triggerBiometricApproval(`Deploy ERC-8183 Escrow for: "${newMilestoneName}"`, executeCreate);
+      triggerBiometricApproval(
+        `Deploy ERC-8183 Escrow for: "${newMilestoneName}"`, 
+        executeCreate,
+        () => setIsDeployingMilestone(false)
+      );
     } else {
       executeCreate();
     }
@@ -2316,7 +2472,11 @@ export default function App() {
           functionName: 'submit',
           args: [BigInt(1), proofHash]
         });
-        addLog('SYSTEM', `Deliverable submitted! Tx Hash: ${tx}`, 'SUCCESS');
+        addLog('SYSTEM', `Submission transaction broadcasted! Hash: ${tx}. Waiting for confirmation...`, 'INFO');
+        if (publicClient) {
+          await publicClient.waitForTransactionReceipt({ hash: tx });
+          addLog('SYSTEM', `Submission confirmed successfully!`, 'SUCCESS');
+        }
       } else {
         // Sandbox mode update
         setMilestones(prev => prev.map(m => {
@@ -2339,6 +2499,7 @@ export default function App() {
   };
 
   const handleApproveEscrow = async (milestoneId: number, jobAddress: string) => {
+    setSubmittingMilestoneActionId(milestoneId);
     const executeApprove = async () => {
       try {
         if (vaultAddress && isAddress(vaultAddress) && jobAddress && jobAddress !== '0x0000000000000000000000000000000000000000') {
@@ -2362,7 +2523,11 @@ export default function App() {
               functionName: 'complete',
               args: [BigInt(1)]
             });
-            addLog('SYSTEM', `Escrow completion approved! Tx Hash: ${tx}`, 'SUCCESS');
+            addLog('SYSTEM', `Escrow completion transaction broadcasted! Hash: ${tx}. Waiting for confirmation...`, 'INFO');
+            if (publicClient) {
+              await publicClient.waitForTransactionReceipt({ hash: tx });
+              addLog('SYSTEM', `Escrow release confirmed successfully!`, 'SUCCESS');
+            }
           }
         } else {
           // Sandbox mode update
@@ -2377,17 +2542,24 @@ export default function App() {
         fetchAllOnChainMilestones();
       } catch (err: any) {
         addLog('SYSTEM', `Escrow approval failed: ${err.message || err}`, 'ERROR');
+      } finally {
+        setSubmittingMilestoneActionId(null);
       }
     };
 
     if (passkeyAccount) {
-      triggerBiometricApproval(`Approve deliverables and release funds for Milestone #${milestoneId}`, executeApprove);
+      triggerBiometricApproval(
+        `Approve deliverables and release funds for Milestone #${milestoneId}`,
+        executeApprove,
+        () => setSubmittingMilestoneActionId(null)
+      );
     } else {
       executeApprove();
     }
   };
 
   const handleRejectEscrow = async (milestoneId: number, jobAddress: string) => {
+    setSubmittingMilestoneActionId(milestoneId);
     const executeReject = async () => {
       try {
         if (vaultAddress && isAddress(vaultAddress) && jobAddress && jobAddress !== '0x0000000000000000000000000000000000000000') {
@@ -2411,7 +2583,11 @@ export default function App() {
               functionName: 'reject',
               args: [BigInt(1)]
             });
-            addLog('SYSTEM', `Escrow rejected! Tx Hash: ${tx}`, 'SUCCESS');
+            addLog('SYSTEM', `Escrow rejection transaction broadcasted! Hash: ${tx}. Waiting for confirmation...`, 'INFO');
+            if (publicClient) {
+              await publicClient.waitForTransactionReceipt({ hash: tx });
+              addLog('SYSTEM', `Escrow rejection confirmed successfully!`, 'SUCCESS');
+            }
           }
         } else {
           // Sandbox mode update
@@ -2426,17 +2602,24 @@ export default function App() {
         fetchAllOnChainMilestones();
       } catch (err: any) {
         addLog('SYSTEM', `Escrow rejection failed: ${err.message || err}`, 'ERROR');
+      } finally {
+        setSubmittingMilestoneActionId(null);
       }
     };
 
     if (passkeyAccount) {
-      triggerBiometricApproval(`Reject deliverables for Milestone #${milestoneId}`, executeReject);
+      triggerBiometricApproval(
+        `Reject deliverables for Milestone #${milestoneId}`,
+        executeReject,
+        () => setSubmittingMilestoneActionId(null)
+      );
     } else {
       executeReject();
     }
   };
 
   const handleClaimRefund = async (milestoneId: number, jobAddress: string) => {
+    setSubmittingMilestoneActionId(milestoneId);
     const executeRefund = async () => {
       try {
         if (vaultAddress && isAddress(vaultAddress) && jobAddress && jobAddress !== '0x0000000000000000000000000000000000000000') {
@@ -2453,7 +2636,11 @@ export default function App() {
               functionName: 'claimRefund',
               args: [BigInt(1)]
             });
-            addLog('SYSTEM', `Refund claimed successfully! Tx Hash: ${tx}`, 'SUCCESS');
+            addLog('SYSTEM', `Refund request transaction broadcasted! Hash: ${tx}. Waiting for confirmation...`, 'INFO');
+            if (publicClient) {
+              await publicClient.waitForTransactionReceipt({ hash: tx });
+              addLog('SYSTEM', `Refund claimed successfully!`, 'SUCCESS');
+            }
           }
         } else {
           addLog('SYSTEM', `Refund claimed for Milestone #${milestoneId} in Sandbox Mode.`, 'SUCCESS');
@@ -2461,11 +2648,17 @@ export default function App() {
         fetchAllOnChainMilestones();
       } catch (err: any) {
         addLog('SYSTEM', `Refund request failed: ${err.message || err}`, 'ERROR');
+      } finally {
+        setSubmittingMilestoneActionId(null);
       }
     };
 
     if (passkeyAccount) {
-      triggerBiometricApproval(`Claim refund for Milestone #${milestoneId}`, executeRefund);
+      triggerBiometricApproval(
+        `Claim refund for Milestone #${milestoneId}`,
+        executeRefund,
+        () => setSubmittingMilestoneActionId(null)
+      );
     } else {
       executeRefund();
     }
@@ -2478,220 +2671,259 @@ export default function App() {
     const amountVal = parseFloat(newPropAmount);
     if (isNaN(amountVal) || amountVal <= 0) return;
 
+    setProposingMultisig(true);
     const executePropose = async () => {
-      if (vaultAddress && isAddress(vaultAddress)) {
-        try {
-          addLog('SYSTEM', `Creating on-chain Multisig proposal...`, 'INFO');
-          const amountUnits = parseUnits(newPropAmount, 6);
-          if (passkeyAccount) {
-            await new Promise(r => setTimeout(r, 1000));
-            addLog('SYSTEM', `[Paymaster] Sponsored transaction via Circle Gas Station: gas fee ($0.00 USDC) paid by entity.`, 'SUCCESS');
-            addLog('SYSTEM', `[ERC-1271] Biometric signature verified on-chain.`, 'SUCCESS');
-            
-            const newP: Proposal = {
-              id: proposals.length + 1,
-              recipient: newPropRecipient,
-              amountERC20: amountVal,
-              data: newPropData,
-              approvalCount: 1,
-              executed: false,
-              isNativeGasTx: newPropIsNativeGas,
-              hasApproved: true
-            };
-            setProposals([...proposals, newP]);
-            addLog('SYSTEM', `Multisig Proposal #${newP.id} proposed on-chain successfully!`, 'SUCCESS');
-          } else {
-            const tx = await writeContract({
-              address: vaultAddress as `0x${string}`,
-              abi: ATO_VAULT_ABI,
-              functionName: 'proposeTransaction',
-              args: [newPropRecipient as `0x${string}`, amountUnits, newPropData as `0x${string}`, newPropIsNativeGas]
-            });
-            addLog('SYSTEM', `Multisig Proposal transaction broadcasted! Hash: ${tx}`, 'SUCCESS');
-            refetchProposalCount();
+      try {
+        if (vaultAddress && isAddress(vaultAddress)) {
+          try {
+            addLog('SYSTEM', `Creating on-chain Multisig proposal...`, 'INFO');
+            const amountUnits = parseUnits(newPropAmount, 6);
+            if (passkeyAccount) {
+              await new Promise(r => setTimeout(r, 1000));
+              addLog('SYSTEM', `[Paymaster] Sponsored transaction via Circle Gas Station: gas fee ($0.00 USDC) paid by entity.`, 'SUCCESS');
+              addLog('SYSTEM', `[ERC-1271] Biometric signature verified on-chain.`, 'SUCCESS');
+              
+              const newP: Proposal = {
+                id: proposals.length + 1,
+                recipient: newPropRecipient,
+                amountERC20: amountVal,
+                data: newPropData,
+                approvalCount: 1,
+                executed: false,
+                isNativeGasTx: newPropIsNativeGas,
+                hasApproved: true
+              };
+              setProposals([...proposals, newP]);
+              addLog('SYSTEM', `Multisig Proposal #${newP.id} proposed on-chain successfully!`, 'SUCCESS');
+            } else {
+              const tx = await writeContract({
+                address: vaultAddress as `0x${string}`,
+                abi: ATO_VAULT_ABI,
+                functionName: 'proposeTransaction',
+                args: [newPropRecipient as `0x${string}`, amountUnits, newPropData as `0x${string}`, newPropIsNativeGas]
+              });
+              addLog('SYSTEM', `Multisig Proposal transaction broadcasted! Hash: ${tx}. Waiting for confirmation...`, 'INFO');
+              if (publicClient) {
+                await publicClient.waitForTransactionReceipt({ hash: tx });
+                addLog('SYSTEM', `Multisig Proposal confirmed on-chain!`, 'SUCCESS');
+              }
+              refetchProposalCount();
+            }
+          } catch (err: any) {
+            addLog('SYSTEM', `Failed to create proposal: ${err.message || err}`, 'ERROR');
           }
-        } catch (err: any) {
-          addLog('SYSTEM', `Failed to create proposal: ${err.message || err}`, 'ERROR');
+        } else {
+          // Sandbox fallback
+          const newP: Proposal = {
+            id: proposals.length + 1,
+            recipient: newPropRecipient,
+            amountERC20: amountVal,
+            data: newPropData,
+            approvalCount: 1,
+            executed: false,
+            isNativeGasTx: newPropIsNativeGas,
+            hasApproved: true
+          };
+          setProposals([...proposals, newP]);
+          addLog('SYSTEM', `Created Sandbox Multisig Proposal #${newP.id} to disburse ${amountVal} USDC`, 'SUCCESS');
         }
-      } else {
-        // Sandbox fallback
-        const newP: Proposal = {
-          id: proposals.length + 1,
-          recipient: newPropRecipient,
-          amountERC20: amountVal,
-          data: newPropData,
-          approvalCount: 1,
-          executed: false,
-          isNativeGasTx: newPropIsNativeGas,
-          hasApproved: true
-        };
-        setProposals([...proposals, newP]);
-        addLog('SYSTEM', `Created Sandbox Multisig Proposal #${newP.id} to disburse ${amountVal} USDC`, 'SUCCESS');
-      }
 
-      setNewPropRecipient('');
-      setNewPropAmount('');
-      setNewPropIsNativeGas(false);
-      setNewPropData('0x');
+        setNewPropRecipient('');
+        setNewPropAmount('');
+        setNewPropIsNativeGas(false);
+        setNewPropData('0x');
+      } finally {
+        setProposingMultisig(false);
+      }
     };
 
     if (passkeyAccount) {
-      triggerBiometricApproval(`Propose Multisig disbursement of ${amountVal} USDC to ${newPropRecipient}`, executePropose);
+      triggerBiometricApproval(
+        `Propose Multisig disbursement of ${amountVal} USDC to ${newPropRecipient}`,
+        executePropose,
+        () => setProposingMultisig(false)
+      );
     } else {
       executePropose();
     }
   };
 
   const handleApproveProposal = async (proposalId: number) => {
+    setApprovingProposalId(proposalId);
     const executeApprove = async () => {
-      if (vaultAddress && isAddress(vaultAddress)) {
-        try {
-          addLog('SYSTEM', `Approving Multisig Proposal #${proposalId}...`, 'INFO');
-          if (passkeyAccount) {
-            await new Promise(r => setTimeout(r, 1000));
-            addLog('SYSTEM', `[Paymaster] Sponsored transaction via Circle Gas Station: gas fee ($0.00 USDC) paid by entity.`, 'SUCCESS');
-            addLog('SYSTEM', `[ERC-1271] Biometric signature verified on-chain.`, 'SUCCESS');
-            
-            setProposals(prev => prev.map(p => {
-              if (p.id === proposalId) {
-                return { ...p, approvalCount: p.approvalCount + 1, hasApproved: true };
-              }
-              return p;
-            }));
-            addLog('SYSTEM', `Proposal #${proposalId} approved successfully!`, 'SUCCESS');
-          } else {
-            // Route through backend Circle Gas Station / Paymaster API
-            try {
-              addLog('SYSTEM', `[Paymaster] Sponsoring transaction for Approve Proposal #${proposalId} via Circle Gas Station API...`, 'INFO');
-              const res = await fetch('http://localhost:3001/api/paymaster/sponsor', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  contractAddress: vaultAddress,
+      try {
+        if (vaultAddress && isAddress(vaultAddress)) {
+          try {
+            addLog('SYSTEM', `Approving Multisig Proposal #${proposalId}...`, 'INFO');
+            if (passkeyAccount) {
+              await new Promise(r => setTimeout(r, 1000));
+              addLog('SYSTEM', `[Paymaster] Sponsored transaction via Circle Gas Station: gas fee ($0.00 USDC) paid by entity.`, 'SUCCESS');
+              addLog('SYSTEM', `[ERC-1271] Biometric signature verified on-chain.`, 'SUCCESS');
+              
+              setProposals(prev => prev.map(p => {
+                if (p.id === proposalId) {
+                  return { ...p, approvalCount: p.approvalCount + 1, hasApproved: true };
+                }
+                return p;
+              }));
+              addLog('SYSTEM', `Proposal #${proposalId} approved successfully!`, 'SUCCESS');
+            } else {
+              // Route through backend Circle Gas Station / Paymaster API
+              try {
+                addLog('SYSTEM', `[Paymaster] Sponsoring transaction for Approve Proposal #${proposalId} via Circle Gas Station API...`, 'INFO');
+                const res = await fetch('http://localhost:3001/api/paymaster/sponsor', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    contractAddress: vaultAddress,
+                    functionName: 'approveProposal',
+                    args: [proposalId]
+                  })
+                });
+                const result = await res.json();
+                if (res.ok && result.success) {
+                  addLog('SYSTEM', `[Paymaster] Gasless override successful! Hash: ${result.txHash} (Gas sponsored by Circle Paymaster)`, 'SUCCESS');
+                  refetchProposalCount();
+                  fetchPaymasterStatus();
+                } else {
+                  throw new Error(result.error || 'Sponsorship rejected');
+                }
+              } catch (paymasterErr: any) {
+                addLog('SYSTEM', `[Paymaster Fallback] Sponsorship unavailable (${paymasterErr.message || paymasterErr}). Initiating standard user-paid transaction...`, 'WARNING');
+                const tx = await writeContract({
+                  address: vaultAddress as `0x${string}`,
+                  abi: ATO_VAULT_ABI,
                   functionName: 'approveProposal',
-                  args: [proposalId]
-                })
-              });
-              const result = await res.json();
-              if (res.ok && result.success) {
-                addLog('SYSTEM', `[Paymaster] Gasless override successful! Hash: ${result.txHash} (Gas sponsored by Circle Paymaster)`, 'SUCCESS');
+                  args: [BigInt(proposalId)]
+                });
+                addLog('SYSTEM', `Approve transaction broadcasted! Hash: ${tx}. Waiting for confirmation...`, 'INFO');
+                if (publicClient) {
+                  await publicClient.waitForTransactionReceipt({ hash: tx });
+                  addLog('SYSTEM', `Approval confirmed on-chain!`, 'SUCCESS');
+                }
                 refetchProposalCount();
-                fetchPaymasterStatus();
-              } else {
-                throw new Error(result.error || 'Sponsorship rejected');
               }
-            } catch (paymasterErr: any) {
-              addLog('SYSTEM', `[Paymaster Fallback] Sponsorship unavailable (${paymasterErr.message || paymasterErr}). Initiating standard user-paid transaction...`, 'WARNING');
-              const tx = await writeContract({
-                address: vaultAddress as `0x${string}`,
-                abi: ATO_VAULT_ABI,
-                functionName: 'approveProposal',
-                args: [BigInt(proposalId)]
-              });
-              addLog('SYSTEM', `Approve broadcasted! Hash: ${tx}`, 'SUCCESS');
-              refetchProposalCount();
             }
+          } catch (err: any) {
+            addLog('SYSTEM', `Approve failed: ${err.message || err}`, 'ERROR');
           }
-        } catch (err: any) {
-          addLog('SYSTEM', `Approve failed: ${err.message || err}`, 'ERROR');
+        } else {
+          // Sandbox fallback
+          setProposals(prev => prev.map(p => {
+            if (p.id === proposalId) {
+              addLog('SYSTEM', `Approved Proposal #${proposalId} (Sandbox)`, 'SUCCESS');
+              return { ...p, approvalCount: p.approvalCount + 1, hasApproved: true };
+            }
+            return p;
+          }));
         }
-      } else {
-        // Sandbox fallback
-        setProposals(prev => prev.map(p => {
-          if (p.id === proposalId) {
-            addLog('SYSTEM', `Approved Proposal #${proposalId} (Sandbox)`, 'SUCCESS');
-            return { ...p, approvalCount: p.approvalCount + 1, hasApproved: true };
-          }
-          return p;
-        }));
+      } finally {
+        setApprovingProposalId(null);
       }
     };
 
     if (passkeyAccount) {
-      triggerBiometricApproval(`Approve Multisig Proposal #${proposalId}`, executeApprove);
+      triggerBiometricApproval(
+        `Approve Multisig Proposal #${proposalId}`,
+        executeApprove,
+        () => setApprovingProposalId(null)
+      );
     } else {
       executeApprove();
     }
   };
 
   const handleExecuteProposal = async (proposalId: number) => {
+    setExecutingProposalId(proposalId);
     const executeExecute = async () => {
-      if (vaultAddress && isAddress(vaultAddress)) {
-        try {
-          addLog('SYSTEM', `Executing Multisig Proposal #${proposalId}...`, 'INFO');
-          if (passkeyAccount) {
-            await new Promise(r => setTimeout(r, 1000));
-            addLog('SYSTEM', `[Paymaster] Sponsored transaction via Circle Gas Station: gas fee ($0.00 USDC) paid by entity.`, 'SUCCESS');
-            addLog('SYSTEM', `[ERC-1271] Biometric signature verified on-chain.`, 'SUCCESS');
-            
+      try {
+        if (vaultAddress && isAddress(vaultAddress)) {
+          try {
+            addLog('SYSTEM', `Executing Multisig Proposal #${proposalId}...`, 'INFO');
+            if (passkeyAccount) {
+              await new Promise(r => setTimeout(r, 1000));
+              addLog('SYSTEM', `[Paymaster] Sponsored transaction via Circle Gas Station: gas fee ($0.00 USDC) paid by entity.`, 'SUCCESS');
+              addLog('SYSTEM', `[ERC-1271] Biometric signature verified on-chain.`, 'SUCCESS');
+              
+              setProposals(prev => prev.map(p => {
+                if (p.id === proposalId) {
+                  return { ...p, executed: true };
+                }
+                return p;
+              }));
+              addLog('SYSTEM', `Proposal #${proposalId} executed successfully on-chain!`, 'SUCCESS');
+            } else {
+              // Route through backend Circle Gas Station / Paymaster API
+              try {
+                addLog('SYSTEM', `[Paymaster] Sponsoring transaction for Execute Proposal #${proposalId} via Circle Gas Station API...`, 'INFO');
+                const res = await fetch('http://localhost:3001/api/paymaster/sponsor', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    contractAddress: vaultAddress,
+                    functionName: 'executeProposal',
+                    args: [proposalId]
+                  })
+                });
+                const result = await res.json();
+                if (res.ok && result.success) {
+                  addLog('SYSTEM', `[Paymaster] Gasless override successful! Hash: ${result.txHash} (Gas sponsored by Circle Paymaster)`, 'SUCCESS');
+                  refetchProposalCount();
+                  refetchVaultBalances();
+                  fetchPaymasterStatus();
+                } else {
+                  throw new Error(result.error || 'Sponsorship rejected');
+                }
+              } catch (paymasterErr: any) {
+                addLog('SYSTEM', `[Paymaster Fallback] Sponsorship unavailable (${paymasterErr.message || paymasterErr}). Initiating standard user-paid transaction...`, 'WARNING');
+                const tx = await writeContract({
+                  address: vaultAddress as `0x${string}`,
+                  abi: ATO_VAULT_ABI,
+                  functionName: 'executeProposal',
+                  args: [BigInt(proposalId)]
+                });
+                addLog('SYSTEM', `Execute transaction broadcasted! Hash: ${tx}. Waiting for confirmation...`, 'INFO');
+                if (publicClient) {
+                  await publicClient.waitForTransactionReceipt({ hash: tx });
+                  addLog('SYSTEM', `Proposal execution confirmed on-chain!`, 'SUCCESS');
+                }
+                refetchProposalCount();
+                refetchVaultBalances();
+              }
+            }
+          } catch (err: any) {
+            addLog('SYSTEM', `Execution failed: ${err.message || err}`, 'ERROR');
+          }
+        } else {
+          // Sandbox fallback
+          const target = proposals.find(p => p.id === proposalId);
+          if (target) {
             setProposals(prev => prev.map(p => {
               if (p.id === proposalId) {
                 return { ...p, executed: true };
               }
               return p;
             }));
-            addLog('SYSTEM', `Proposal #${proposalId} executed successfully on-chain!`, 'SUCCESS');
-          } else {
-            // Route through backend Circle Gas Station / Paymaster API
-            try {
-              addLog('SYSTEM', `[Paymaster] Sponsoring transaction for Execute Proposal #${proposalId} via Circle Gas Station API...`, 'INFO');
-              const res = await fetch('http://localhost:3001/api/paymaster/sponsor', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  contractAddress: vaultAddress,
-                  functionName: 'executeProposal',
-                  args: [proposalId]
-                })
-              });
-              const result = await res.json();
-              if (res.ok && result.success) {
-                addLog('SYSTEM', `[Paymaster] Gasless override successful! Hash: ${result.txHash} (Gas sponsored by Circle Paymaster)`, 'SUCCESS');
-                refetchProposalCount();
-                refetchVaultBalances();
-                fetchPaymasterStatus();
-              } else {
-                throw new Error(result.error || 'Sponsorship rejected');
-              }
-            } catch (paymasterErr: any) {
-              addLog('SYSTEM', `[Paymaster Fallback] Sponsorship unavailable (${paymasterErr.message || paymasterErr}). Initiating standard user-paid transaction...`, 'WARNING');
-              const tx = await writeContract({
-                address: vaultAddress as `0x${string}`,
-                abi: ATO_VAULT_ABI,
-                functionName: 'executeProposal',
-                args: [BigInt(proposalId)]
-              });
-              addLog('SYSTEM', `Execute transaction broadcasted! Hash: ${tx}`, 'SUCCESS');
-              refetchProposalCount();
-              refetchVaultBalances();
+
+            if (target.isNativeGasTx) {
+              setVaultBalanceNativeGas(prev => prev - target.amountERC20);
+            } else {
+              setVaultBalanceERC20(prev => prev - target.amountERC20);
             }
+            addLog('SYSTEM', `Executed Proposal #${proposalId} successfully (Sandbox)`, 'SUCCESS');
           }
-        } catch (err: any) {
-          addLog('SYSTEM', `Execution failed: ${err.message || err}`, 'ERROR');
         }
-      } else {
-        // Sandbox fallback
-        const target = proposals.find(p => p.id === proposalId);
-        if (!target) return;
-
-        setProposals(prev => prev.map(p => {
-          if (p.id === proposalId) {
-            return { ...p, executed: true };
-          }
-          return p;
-        }));
-
-        if (target.isNativeGasTx) {
-          setVaultBalanceNativeGas(prev => prev - target.amountERC20);
-        } else {
-          setVaultBalanceERC20(prev => prev - target.amountERC20);
-        }
-        addLog('SYSTEM', `Executed Proposal #${proposalId} successfully (Sandbox)`, 'SUCCESS');
+      } finally {
+        setExecutingProposalId(null);
       }
     };
 
     if (passkeyAccount) {
-      triggerBiometricApproval(`Execute Multisig Proposal #${proposalId}`, executeExecute);
+      triggerBiometricApproval(
+        `Execute Multisig Proposal #${proposalId}`,
+        executeExecute,
+        () => setExecutingProposalId(null)
+      );
     } else {
       executeExecute();
     }
@@ -3365,21 +3597,18 @@ export default function App() {
                     </div>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.25rem', flexWrap: 'wrap' }}>
-                      <button 
-                        onClick={handleDeployVault} 
-                        disabled={isDeployPending}
-                        className="hex-blueprint-btn" 
+                      <PremiumButton
+                        onClick={handleDeployVault}
+                        loading={isDeployPending}
+                        label="Create New Account"
+                        loadingLabel="Creating your account..."
                         style={{ width: 'auto', padding: '0.45rem 1.25rem', fontSize: '0.65rem', borderColor: 'var(--accent-pink)' }}
-                      >
-                        {isDeployPending ? 'Creating your account...' : 'Create New Account'}
-                      </button>
-                      <button 
+                      />
+                      <PremiumButton
                         onClick={() => setIsOnboardingPasskey(true)}
-                        className="hex-blueprint-btn" 
+                        label="⚡ Create Smart Account (Passkey)"
                         style={{ width: 'auto', padding: '0.45rem 1.25rem', fontSize: '0.65rem', borderColor: 'var(--accent-cyan)' }}
-                      >
-                        ⚡ Create Smart Account (Passkey)
-                      </button>
+                      />
                       {deployError && (
                         <span style={{ fontSize: '0.6rem', color: 'var(--accent-red)' }}>
                           Something went wrong. Please try again.
@@ -3427,13 +3656,13 @@ export default function App() {
                         className="form-input"
                         style={{ fontSize: '0.65rem', flex: 1 }}
                       />
-                      <button 
+                      <PremiumButton
                         onClick={handleRegisterPasskeySCA}
-                        className="hex-blueprint-btn"
+                        loading={passkeyStep > 0 && passkeyStep < 4}
+                        label="Register"
+                        loadingLabel="Registering..."
                         style={{ width: 'auto', padding: '0.45rem 1rem', fontSize: '0.65rem', borderColor: 'var(--accent-pink)' }}
-                      >
-                        Register
-                      </button>
+                      />
                     </div>
                     <button 
                       onClick={() => setIsOnboardingPasskey(false)} 
@@ -3564,9 +3793,9 @@ export default function App() {
           </section>
 
           {/* --- TAB ROUTING CONTENT --- */}
-          
-          {/* TAB 1: DASHBOARD & SIMULATOR */}
-          {activeTab === 'dashboard' && (
+          <PageTransitionWrapper activeKey={activeTab}>
+            {/* TAB 1: DASHBOARD & SIMULATOR */}
+            {activeTab === 'dashboard' && (
             <div className="dashboard-grid">
               
               {/* Form Simulator */}
@@ -3646,11 +3875,41 @@ export default function App() {
                     </div>
                   )}
 
-                  <button type="submit" disabled={simulationActive} className="hex-blueprint-btn" style={{ marginTop: '0.5rem' }}>
-                    {simulationActive ? 'Processing your payment...' : vaultAddress ? 'Send Payment' : 'Preview Payment (Demo)'}
-                  </button>
+                  <PremiumButton
+                    type="submit"
+                    loading={simulationActive}
+                    label={vaultAddress ? 'Send Payment' : 'Preview Payment (Demo)'}
+                    loadingLabel="Processing your payment..."
+                    style={{ marginTop: '0.5rem', width: '100%' }}
+                  />
                 </form>
               </div>
+
+              {vaultAddress && (
+                <div className="glass-panel" style={{ padding: '1.5rem', marginTop: '1.5rem' }}>
+                  <div className="card-title-block">
+                    <h3>Fund Vault Treasury</h3>
+                    <p>Transfer testnet USDC from your connected wallet directly into the vault on-chain to fund operational payouts and milestones.</p>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+                    <input 
+                      type="number" 
+                      placeholder="Amount to deposit (USDC)"
+                      value={depositAmount}
+                      onChange={e => setDepositAmount(e.target.value)}
+                      className="form-input"
+                      style={{ flex: 1, fontSize: '0.72rem' }}
+                    />
+                    <PremiumButton
+                      onClick={handleDepositUSDC}
+                      loading={depositLoading}
+                      label="Deposit USDC"
+                      loadingLabel="Depositing..."
+                      style={{ fontSize: '0.68rem', padding: '0.45rem 1.25rem', borderColor: 'var(--accent-pink)' }}
+                    />
+                  </div>
+                </div>
+              )}
 
               {/* Dynamic Pipeline & Terminal Output */}
               <div className="console-container">
@@ -3680,9 +3939,7 @@ export default function App() {
                         <div className={`pipeline-circle ${
                           pipelineStep >= 2 ? 'pipeline-circle-completed' :
                           pipelineStep === 1 ? 'pipeline-circle-active animate-pulse' : ''
-                        }`}>
-                          ✔
-                        </div>
+                        }`}>✔</div>
                         <span className="pipeline-step-label">Verify Funds</span>
                       </div>
 
@@ -3691,9 +3948,7 @@ export default function App() {
                         <div className={`pipeline-circle ${
                           pipelineStep >= 3 ? 'pipeline-circle-completed' :
                           pipelineStep === 2 ? 'pipeline-circle-active animate-pulse' : ''
-                        }`}>
-                          🛡
-                        </div>
+                        }`}>🛡</div>
                         <span className="pipeline-step-label">Safety Check</span>
                       </div>
 
@@ -3703,9 +3958,7 @@ export default function App() {
                           pipelineStep >= 4 && pipelineStep !== 5 ? 'pipeline-circle-completed' :
                           pipelineStep === 5 ? 'pipeline-circle-failed' :
                           pipelineStep === 3 ? 'pipeline-circle-active animate-pulse' : ''
-                        }`}>
-                          💸
-                        </div>
+                        }`}>💸</div>
                         <span className="pipeline-step-label">Send Money</span>
                       </div>
 
@@ -3789,7 +4042,12 @@ export default function App() {
                   <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>Pending Approvals</h3>
                   
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    {proposals.length === 0 ? (
+                    {proposalsLoading ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                        <SkeletonCard />
+                        <SkeletonCard />
+                      </div>
+                    ) : proposals.length === 0 ? (
                       <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>No payments waiting for team approval. When a large payment needs sign-off, it will appear here.</p>
                     ) : (
                       proposals.map(p => (
@@ -3825,23 +4083,26 @@ export default function App() {
                             
                             <div style={{ display: 'flex', gap: '0.5rem' }}>
                               {!p.executed && (
-                                <button
+                                <PremiumButton
                                   onClick={() => handleApproveProposal(p.id)}
-                                  disabled={p.hasApproved}
+                                  disabled={p.hasApproved || approvingProposalId !== null || executingProposalId !== null}
+                                  loading={approvingProposalId === p.id}
+                                  label={p.hasApproved ? 'You approved ✓' : 'Approve'}
+                                  loadingLabel="Approving..."
                                   className="console-clear-btn"
                                   style={{ padding: '0.25rem 0.5rem', fontSize: '0.65rem', borderColor: p.hasApproved ? 'transparent' : 'var(--accent-pink)' }}
-                                >
-                                  {p.hasApproved ? 'You approved ✓' : 'Approve'}
-                                </button>
+                                />
                               )}
                               {!p.executed && (
-                                <button
+                                <PremiumButton
                                   onClick={() => handleExecuteProposal(p.id)}
+                                  disabled={approvingProposalId !== null || executingProposalId !== null}
+                                  loading={executingProposalId === p.id}
+                                  label="Send Now"
+                                  loadingLabel="Sending..."
                                   className="hex-blueprint-btn"
                                   style={{ padding: '0.25rem 0.5rem', fontSize: '0.65rem', width: 'auto' }}
-                                >
-                                  Send Now
-                                </button>
+                                />
                               )}
                             </div>
                           </div>
@@ -3908,9 +4169,13 @@ export default function App() {
                       <label htmlFor="nativeGasTx" style={{ margin: 0, cursor: 'pointer' }}>This is an operations fund transfer (for transaction fees)</label>
                     </div>
 
-                    <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
-                      Submit for Approval
-                    </button>
+                    <PremiumButton
+                      type="submit"
+                      loading={proposingMultisig}
+                      label="Submit for Approval"
+                      loadingLabel="Submitting Proposal..."
+                      style={{ fontSize: '0.72rem', padding: '0.65rem', width: '100%' }}
+                    />
                   </form>
                 </div>
 
@@ -4535,7 +4800,9 @@ export default function App() {
                       </h3>
 
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', overflowY: 'auto', maxHeight: '250px' }}>
-                        {bridgeLogs.length === 0 ? (
+                        {bridgeLogsLoading ? (
+                          <SkeletonTable />
+                        ) : bridgeLogs.length === 0 ? (
                           <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', textAlign: 'center', padding: '1.5rem 0' }}>
                             No automated bridge transactions recorded yet.
                           </div>
@@ -4599,7 +4866,12 @@ export default function App() {
                   </div>
                   
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
-                    {milestones.length === 0 ? (
+                    {milestonesLoading ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                        <SkeletonCard />
+                        <SkeletonCard />
+                      </div>
+                    ) : milestones.length === 0 ? (
                       <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'center', padding: '2rem 0' }}>No active job escrows found. Use the panel on the right to deploy one.</p>
                     ) : (
                       milestones.map(m => {
@@ -4680,14 +4952,13 @@ export default function App() {
                                         style={{ fontSize: '0.65rem', padding: '0.4rem' }}
                                       />
                                       <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                        <button 
+                                        <PremiumButton 
                                           onClick={() => handleSubmitDeliverable(m.id, m.jobContractAddress || '')}
-                                          disabled={submittingDeliverable}
-                                          className="hex-blueprint-btn" 
+                                          loading={submittingDeliverable}
+                                          label="Confirm Submission"
+                                          loadingLabel="Submitting..."
                                           style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'var(--accent-pink)' }}
-                                        >
-                                          {submittingDeliverable ? 'Submitting...' : 'Confirm Submission'}
-                                        </button>
+                                        />
                                         <button 
                                           onClick={() => { setSubmittingDeliverableMilestoneId(null); setDeliverableProofText(''); }}
                                           className="hex-blueprint-btn" 
@@ -4703,31 +4974,34 @@ export default function App() {
 
                               {jobStatusVal === 2 && (
                                 <>
-                                  <button 
+                                  <PremiumButton 
                                     onClick={() => handleApproveEscrow(m.id, m.jobContractAddress || '')}
                                     className="hex-blueprint-btn" 
                                     style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'green' }}
-                                  >
-                                    ✓ Approve & Release Payout
-                                  </button>
-                                  <button 
+                                    loading={submittingMilestoneActionId === m.id}
+                                    label="✓ Approve & Release Payout"
+                                    loadingLabel="Approving..."
+                                  />
+                                  <PremiumButton 
                                     onClick={() => handleRejectEscrow(m.id, m.jobContractAddress || '')}
                                     className="hex-blueprint-btn" 
                                     style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'red' }}
-                                  >
-                                    ✗ Reject Deliverables
-                                  </button>
+                                    loading={submittingMilestoneActionId === m.id}
+                                    label="✗ Reject Deliverables"
+                                    loadingLabel="Rejecting..."
+                                  />
                                 </>
                               )}
 
                               {jobStatusVal === 4 && (
-                                <button 
+                                <PremiumButton 
                                   onClick={() => handleClaimRefund(m.id, m.jobContractAddress || '')}
                                   className="hex-blueprint-btn" 
                                   style={{ fontSize: '0.65rem', padding: '0.4rem 0.8rem', background: 'rgba(255,255,255,0.1)' }}
-                                >
-                                  ↺ Claim Escrow Refund
-                                </button>
+                                  loading={submittingMilestoneActionId === m.id}
+                                  label="↺ Claim Escrow Refund"
+                                  loadingLabel="Claiming..."
+                                />
                               )}
                             </div>
                           </div>
@@ -4808,9 +5082,13 @@ export default function App() {
                     />
                   </div>
 
-                  <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem', background: 'var(--primary-gradient)' }}>
-                    {vaultAddress ? '🔒 Deploy & Fund Escrow' : '🔒 Deploy & Fund Escrow (Demo)'}
-                  </button>
+                  <PremiumButton
+                    type="submit"
+                    loading={isDeployingMilestone}
+                    label={vaultAddress ? '🔒 Deploy & Fund Escrow' : '🔒 Deploy & Fund Escrow (Demo)'}
+                    loadingLabel="Deploying Escrow..."
+                    style={{ fontSize: '0.72rem', padding: '0.65rem', background: 'var(--primary-gradient)' }}
+                  />
                 </form>
               </div>
 
@@ -4865,6 +5143,22 @@ export default function App() {
                         Before any payment goes out, we check that the recipient is safe. You can manage your trust list here.
                       </p>
 
+                      <div style={{ position: 'relative', margin: '0.75rem 0' }}>
+                        <input 
+                          type="text" 
+                          placeholder="Search trusted recipients..." 
+                          className="form-input" 
+                          value={complianceSearch} 
+                          onChange={(e) => {
+                            setComplianceSearch(e.target.value);
+                            setComplianceSearchLoading(true);
+                            setTimeout(() => setComplianceSearchLoading(false), 300);
+                          }} 
+                          style={{ paddingRight: '2.5rem', fontSize: '0.7rem', height: '32px' }} 
+                        />
+                        {complianceSearchLoading && <SearchFilterLoader />}
+                      </div>
+
                       <div className="screening-table-container">
                         <table className="screening-table">
                           <thead>
@@ -4876,7 +5170,10 @@ export default function App() {
                             </tr>
                           </thead>
                           <tbody>
-                            {complianceRegistry.map(c => (
+                            {complianceRegistry.filter(c => 
+                              c.label.toLowerCase().includes(complianceSearch.toLowerCase()) ||
+                              c.address.toLowerCase().includes(complianceSearch.toLowerCase())
+                            ).map(c => (
                               <tr key={c.address} className="table-row">
                                 <td style={{ fontFamily: 'var(--font-sans)', fontWeight: '500', color: '#fff' }}>{c.label}</td>
                                 <td style={{ color: 'var(--text-muted)' }}>{c.address}</td>
@@ -6114,9 +6411,14 @@ export default function App() {
                       </button>
                     </div>
                     
-                    <button type="submit" disabled={payoutLoading || !selectedBankAccountId} className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem', borderColor: 'var(--accent-pink)', marginTop: '0.25rem' }}>
-                      {payoutLoading ? 'Processing Treasury Sweep...' : 'Trigger Payout (Sweep to Bank)'}
-                    </button>
+                    <PremiumButton
+                      type="submit"
+                      loading={payoutLoading}
+                      disabled={!selectedBankAccountId}
+                      label="Trigger Payout (Sweep to Bank)"
+                      loadingLabel="Processing Treasury Sweep..."
+                      style={{ fontSize: '0.72rem', padding: '0.65rem', borderColor: 'var(--accent-pink)', marginTop: '0.25rem', width: '100%' }}
+                    />
                   </form>
                 </div>
 
@@ -6623,22 +6925,22 @@ export default function App() {
                       Diversify corporate reserves across a custom index of stablecoins on Arc. Monitor allocations, propose weight adjustments, and review autonomous rebalancing trades.
                     </p>
                   </div>
-                  <div style={{ display: 'flex', gap: '0.75rem' }}>
-                    <button 
+                    <PremiumButton 
                       onClick={simulateIndexDrift} 
                       className="action-button-secondary"
+                      loading={rebalancingIndex}
+                      label="⚡ Simulate Drift Imbalance"
+                      loadingLabel="Simulating..."
                       style={{ fontSize: '0.68rem', padding: '0.5rem 1rem' }}
-                    >
-                      ⚡ Simulate Drift Imbalance
-                    </button>
-                    <button 
+                    />
+                    <PremiumButton 
                       onClick={triggerAutoRebalance} 
                       className="action-button-primary"
+                      loading={rebalancingIndex}
+                      label="🔄 Trigger Auto-Rebalance"
+                      loadingLabel="Rebalancing..."
                       style={{ fontSize: '0.68rem', padding: '0.5rem 1rem' }}
-                    >
-                      🔄 Trigger Auto-Rebalance
-                    </button>
-                  </div>
+                    />
                 </div>
               </div>
 
@@ -6722,13 +7024,14 @@ export default function App() {
                         Signatures: {pendingIndexProposal.approvals.join(', ')}
                       </div>
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <button
+                        <PremiumButton
                           onClick={() => approveIndexProposal('Owner 2')}
                           className="action-button-primary"
+                          loading={proposingIndex}
+                          label="✍ Sign off as Owner 2"
+                          loadingLabel="Signing..."
                           style={{ flex: 1, fontSize: '0.65rem', padding: '0.4rem 0.8rem' }}
-                        >
-                          ✍ Sign off as Owner 2
-                        </button>
+                        />
                       </div>
                     </div>
                   ) : (
@@ -6765,14 +7068,15 @@ export default function App() {
                         <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
                           Total: <strong style={{ color: Number(targetUSDC) + Number(targetEURC) === 100 ? 'var(--accent-cyan)' : 'var(--accent-red)' }}>{Number(targetUSDC) + Number(targetEURC)}%</strong> (Must be 100%)
                         </span>
-                        <button
+                        <PremiumButton
                           type="submit"
                           disabled={Number(targetUSDC) + Number(targetEURC) !== 100}
+                          loading={proposingIndex}
+                          label="Propose Index Settings"
+                          loadingLabel="Proposing..."
                           className="action-button-primary"
                           style={{ fontSize: '0.7rem', padding: '0.5rem 1.2rem' }}
-                        >
-                          Propose Index Settings
-                        </button>
+                        />
                       </div>
                     </form>
                   )}
@@ -6797,33 +7101,41 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {rebalanceHistory.map((log) => (
-                        <tr key={log.id}>
-                          <td>{new Date(log.createdAt).toLocaleString()}</td>
-                          <td style={{ fontWeight: 'bold', color: '#fff' }}>
-                            Sold {log.sellAmount} {log.sellToken} ➜ Bought {log.buyAmount} {log.buyToken}
-                          </td>
-                          <td>
-                            <a 
-                              href={`https://testnet.arcscan.app/tx/${log.txHash}`} 
-                              target="_blank" 
-                              rel="noreferrer" 
-                              style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}
-                            >
-                              {log.txHash.substring(0, 10)}...
-                            </a>
-                          </td>
-                          <td>
-                            <span className="status-badge status-badge-success">
-                              {log.status}
-                            </span>
-                          </td>
-                          <td style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
-                            {log.details}
+                      {indexLoading ? (
+                        <tr>
+                          <td colSpan={5}>
+                            <SkeletonTable />
                           </td>
                         </tr>
-                      ))}
-                      {rebalanceHistory.length === 0 && (
+                      ) : (
+                        rebalanceHistory.map((log) => (
+                          <tr key={log.id}>
+                            <td>{new Date(log.createdAt).toLocaleString()}</td>
+                            <td style={{ fontWeight: 'bold', color: '#fff' }}>
+                              Sold {log.sellAmount} {log.sellToken} ➜ Bought {log.buyAmount} {log.buyToken}
+                            </td>
+                            <td>
+                              <a 
+                                href={`https://testnet.arcscan.app/tx/${log.txHash}`} 
+                                target="_blank" 
+                                rel="noreferrer" 
+                                style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}
+                              >
+                                {log.txHash.substring(0, 10)}...
+                              </a>
+                            </td>
+                            <td>
+                              <span className="status-badge status-badge-success">
+                                {log.status}
+                              </span>
+                            </td>
+                            <td style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                              {log.details}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                      {!indexLoading && rebalanceHistory.length === 0 && (
                         <tr>
                           <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '1.5rem' }}>
                             No rebalancing swaps recorded yet.
@@ -7280,6 +7592,7 @@ export default function App() {
 
             </div>
           )}
+          </PageTransitionWrapper>
 
         </main>
       </div>
