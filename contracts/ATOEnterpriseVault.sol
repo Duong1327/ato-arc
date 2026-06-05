@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "./interfaces/IComplianceOracle.sol";
 import "./interfaces/IERC8004Registry.sol";
 import "./interfaces/IERC1271.sol";
+import "./interfaces/IStableFX.sol";
 import "./ERC8183Job.sol";
 
 /**
@@ -34,6 +35,8 @@ contract ATOEnterpriseVault {
     // --- CONSTANTS ---
     // The official USDC contract address on Arc Testnet
     address public constant ERC20_USDC_ADDRESS = 0x3600000000000000000000000000000000000000;
+    // The official EURC contract address on Arc Testnet
+    address public constant ERC20_EURC_ADDRESS = 0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a;
     
     // Decimal Scaling Factor: Arc L1 Native Gas USDC (18 decimals) vs. ERC-20 USDC (6 decimals)
     // 10^18 / 10^6 = 10^12
@@ -50,6 +53,7 @@ contract ATOEnterpriseVault {
         address jobContractAddress;
         address provider;
         address evaluator;
+        address token;           // Dynamic token address (USDC, EURC, etc.)
     }
 
     struct TransactionProposal {
@@ -87,6 +91,11 @@ contract ATOEnterpriseVault {
     address public agentRegistryAddress;
     mapping(address => uint256) public agentNonces;
 
+    // StableFX & Multi-Token variables
+    address public stableFXAddress;
+    address[] public registeredTokens;
+    mapping(address => bool) public isTokenRegistered;
+
     // --- EVENTS ---
     event AgentStatusUpdated(address indexed agent, bool indexed status);
     event OwnerStatusUpdated(address indexed owner, bool indexed status);
@@ -106,6 +115,9 @@ contract ATOEnterpriseVault {
     event ComplianceBlocklistUpdated(address indexed targetAddress, bool isBlocklisted);
     event ComplianceOracleUpdated(address indexed oldOracle, address indexed newOracle);
     event AgentRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event StableFXAddressUpdated(address indexed oldStableFX, address indexed newStableFX);
+    event FxTradeExecuted(address indexed sellToken, address indexed buyToken, uint256 sellAmount, uint256 buyAmountBought, address indexed recipient);
+    event TokenRegistered(address indexed tokenAddress);
     
     // --- CUSTOM ERRORS ---
     error NotAnOwner();
@@ -174,6 +186,15 @@ contract ATOEnterpriseVault {
         
         requiredSignatures = _requiredSignatures;
         agentSingleTxLimitERC20 = _agentSingleTxLimitERC20;
+
+        // Register default tokens
+        isTokenRegistered[ERC20_USDC_ADDRESS] = true;
+        registeredTokens.push(ERC20_USDC_ADDRESS);
+        emit TokenRegistered(ERC20_USDC_ADDRESS);
+
+        isTokenRegistered[ERC20_EURC_ADDRESS] = true;
+        registeredTokens.push(ERC20_EURC_ADDRESS);
+        emit TokenRegistered(ERC20_EURC_ADDRESS);
         
         emit SignatureThresholdUpdated(0, _requiredSignatures);
         emit AgentLimitUpdated(0, _agentSingleTxLimitERC20);
@@ -255,6 +276,56 @@ contract ATOEnterpriseVault {
         agentRegistryAddress = newRegistry;
     }
 
+    /**
+     * @notice Allows owners to register a token for operations (e.g. EURC).
+     */
+    function registerToken(address tokenAddress) external onlyOwner {
+        if (tokenAddress == address(0)) revert InvalidAddress();
+        if (isTokenRegistered[tokenAddress]) return;
+        isTokenRegistered[tokenAddress] = true;
+        registeredTokens.push(tokenAddress);
+        emit TokenRegistered(tokenAddress);
+    }
+
+    /**
+     * @notice Allows owners to update the StableFX trading contract address.
+     */
+    function setStableFXAddress(address newStableFX) external onlyOwner {
+        emit StableFXAddressUpdated(stableFXAddress, newStableFX);
+        stableFXAddress = newStableFX;
+    }
+
+    /**
+     * @notice Execute an FX swap/trade (e.g. USDC to EURC or EURC to USDC) on Arc's StableFX engine.
+     */
+    function executeFxTrade(
+        address sellToken,
+        address buyToken,
+        uint256 sellAmount,
+        uint256 minBuyAmount,
+        address recipient
+    ) 
+        external 
+        onlyAgentOrOwner 
+        returns (uint256 buyAmountBought) 
+    {
+        if (stableFXAddress == address(0)) revert InvalidAddress();
+        if (!isTokenRegistered[sellToken] || !isTokenRegistered[buyToken]) revert InvalidAddress();
+        if (recipient == address(0)) revert InvalidAddress();
+
+        IERC20(sellToken).approve(stableFXAddress, sellAmount);
+
+        buyAmountBought = IStableFX(stableFXAddress).executeSwap(
+            sellToken,
+            buyToken,
+            sellAmount,
+            minBuyAmount,
+            recipient
+        );
+
+        emit FxTradeExecuted(sellToken, buyToken, sellAmount, buyAmountBought, recipient);
+    }
+
     // --- MILESTONE TREASURY ALLOCATIONS ---
 
     /**
@@ -268,9 +339,31 @@ contract ATOEnterpriseVault {
         uint256 allocatedERC20, 
         uint256 duration,
         address provider,
+        address evaluator,
+        address token
+    ) external onlyOwner {
+        _createMilestoneInternal(name, allocatedERC20, duration, provider, evaluator, token);
+    }
+
+    function createMilestone(
+        string calldata name, 
+        uint256 allocatedERC20, 
+        uint256 duration,
+        address provider,
         address evaluator
     ) external onlyOwner {
-        if (provider == address(0) || evaluator == address(0)) revert InvalidAddress();
+        _createMilestoneInternal(name, allocatedERC20, duration, provider, evaluator, ERC20_USDC_ADDRESS);
+    }
+
+    function _createMilestoneInternal(
+        string memory name, 
+        uint256 allocatedERC20, 
+        uint256 duration,
+        address provider,
+        address evaluator,
+        address token
+    ) internal {
+        if (provider == address(0) || evaluator == address(0) || !isTokenRegistered[token]) revert InvalidAddress();
 
         milestoneCount++;
         
@@ -279,19 +372,19 @@ contract ATOEnterpriseVault {
             address(this),
             provider,
             evaluator,
-            ERC20_USDC_ADDRESS,
+            token,
             allocatedERC20,
             block.timestamp + duration,
             bytes32(0)
         );
 
         // Approve the newly deployed job escrow contract to pull tokens
-        IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
-        if (usdc.balanceOf(address(this)) < allocatedERC20) revert InsufficientVaultBalance();
+        IERC20 erc20Token = IERC20(token);
+        if (erc20Token.balanceOf(address(this)) < allocatedERC20) revert InsufficientVaultBalance();
 
-        usdc.approve(address(jobContract), allocatedERC20);
+        erc20Token.approve(address(jobContract), allocatedERC20);
 
-        // Call fund to lock target USDC into the job escrow contract
+        // Call fund to lock target tokens into the job escrow contract
         jobContract.fund(1);
 
         milestones[milestoneCount] = Milestone({
@@ -303,7 +396,8 @@ contract ATOEnterpriseVault {
             exists: true,
             jobContractAddress: address(jobContract),
             provider: provider,
-            evaluator: evaluator
+            evaluator: evaluator,
+            token: token
         });
 
         emit MilestoneCreated(milestoneCount, name, allocatedERC20, block.timestamp + duration);
@@ -371,6 +465,66 @@ contract ATOEnterpriseVault {
         internal 
         returns (bool) 
     {
+        return _executeAgentDirectPayoutToken(ERC20_USDC_ADDRESS, recipient, amountERC20, nonce, agent, signature, ethSignedMessageHash);
+    }
+
+    /**
+     * @notice Executed by agents or smart wallets to pay invoices directly using any registered token.
+     */
+    function agentDirectPayoutToken(
+        address token,
+        address recipient, 
+        uint256 amountERC20,
+        uint256 nonce,
+        bytes calldata signature
+    ) 
+        external 
+        onlyAgentOrOwner 
+        complianceCheck(recipient) 
+        returns (bool) 
+    {
+        bytes32 messageHash = keccak256(abi.encodePacked(token, recipient, amountERC20, nonce, address(this), block.chainid));
+        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
+        address signer = recoverSigner(ethSignedMessageHash, signature);
+        
+        return _executeAgentDirectPayoutToken(token, recipient, amountERC20, nonce, signer, signature, ethSignedMessageHash);
+    }
+
+    /**
+     * @notice Executed by agents or smart wallets to pay invoices using registered token with smart contract agents.
+     */
+    function agentDirectPayoutToken(
+        address token,
+        address recipient, 
+        uint256 amountERC20,
+        uint256 nonce,
+        address agent,
+        bytes calldata signature
+    ) 
+        external 
+        onlyAgentOrOwner 
+        complianceCheck(recipient) 
+        returns (bool) 
+    {
+        bytes32 messageHash = keccak256(abi.encodePacked(token, recipient, amountERC20, nonce, address(this), block.chainid));
+        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
+        
+        return _executeAgentDirectPayoutToken(token, recipient, amountERC20, nonce, agent, signature, ethSignedMessageHash);
+    }
+
+    function _executeAgentDirectPayoutToken(
+        address token,
+        address recipient,
+        uint256 amountERC20,
+        uint256 nonce,
+        address agent,
+        bytes calldata signature,
+        bytes32 ethSignedMessageHash
+    ) 
+        internal 
+        returns (bool) 
+    {
+        if (!isTokenRegistered[token]) revert InvalidAddress();
         if (amountERC20 > agentSingleTxLimitERC20) revert AgentLimitExceeded();
         if (agent == address(0)) revert InvalidSignature();
 
@@ -388,12 +542,12 @@ contract ATOEnterpriseVault {
 
         agentNonces[agent]++;
 
-        IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
-        if (usdc.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
+        IERC20 erc20Token = IERC20(token);
+        if (erc20Token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
 
         emit DirectTransferExecuted(agent, recipient, amountERC20);
 
-        bool success = usdc.transfer(recipient, amountERC20);
+        bool success = erc20Token.transfer(recipient, amountERC20);
         if (!success) revert ExecutionFailed();
         return true;
     }
@@ -446,9 +600,9 @@ contract ATOEnterpriseVault {
         // agent will trigger the releaseFunds / complete function directly on the job contract.
         // Otherwise, execute the fallback direct transfer from the vault.
         if (milestone.jobContractAddress == address(0)) {
-            IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
-            if (usdc.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
-            bool success = usdc.transfer(recipient, amountERC20);
+            IERC20 token = IERC20(milestone.token == address(0) ? ERC20_USDC_ADDRESS : milestone.token);
+            if (token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
+            bool success = token.transfer(recipient, amountERC20);
             if (!success) revert ExecutionFailed();
         }
 
@@ -546,6 +700,24 @@ contract ATOEnterpriseVault {
     function getTreasuryBalances() external view returns (uint256 erc20Balance, uint256 nativeGasBalance) {
         erc20Balance = IERC20(ERC20_USDC_ADDRESS).balanceOf(address(this));
         nativeGasBalance = address(this).balance;
+    }
+
+    /**
+     * @notice Get current asset balances of the Vault for a specific token.
+     * @return erc20Balance Token ERC-20 balance (6 decimals).
+     * @return nativeGasBalance Arc Native Gas USDC balance (18 decimals).
+     */
+    function getTreasuryBalances(address token) external view returns (uint256 erc20Balance, uint256 nativeGasBalance) {
+        if (!isTokenRegistered[token]) return (0, address(this).balance);
+        erc20Balance = IERC20(token).balanceOf(address(this));
+        nativeGasBalance = address(this).balance;
+    }
+
+    /**
+     * @notice Get all registered tokens in this vault.
+     */
+    function getRegisteredTokens() external view returns (address[] memory) {
+        return registeredTokens;
     }
 
     /**
