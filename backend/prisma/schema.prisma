@@ -1,0 +1,72 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // For production, change provider to "postgresql" and configure DATABASE_URL in .env
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Invoice {
+  id           String        @id
+  amount       Float
+  token        String
+  recipient    String
+  type         String        // "milestone" or "direct"
+  milestoneId  Int?
+  status       String        // "PENDING", "COMPLIANCE_APPROVED", "SETTLED", "FAILED"
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  transactions Transaction[]
+}
+
+model Transaction {
+  id               String   @id // Circle transactionId or on-chain tx hash
+  invoiceId        String
+  invoice          Invoice  @relation(fields: [invoiceId], references: [id])
+  walletId         String
+  amount           Float
+  status           String   // "PENDING", "SUCCESS", "FAILED"
+  blockchainTxHash String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model WebhookLog {
+  id           String   @id @default(uuid())
+  eventId      String   @unique // Circle event ID for idempotency/duplicate checking
+  eventType    String   // e.g. "transfers.updated" or "wallets.transaction.succeeded"
+  payload      String   // Raw payload JSON
+  status       String   // "PROCESSED", "DUPLICATE", "FAILED", "IGNORED"
+  errorMessage String?
+  createdAt    DateTime @default(now())
+}
+
+model BankAccount {
+  id            String            @id
+  bankName      String
+  accountNumber String
+  routingNumber String
+  status        String            // "ACTIVE", "PENDING", "FAILED"
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  wires         WireTransaction[]
+}
+
+model WireTransaction {
+  id            String      @id // Circle payout/deposit transferId or simulated wire ID
+  bankAccountId String
+  bankAccount   BankAccount @relation(fields: [bankAccountId], references: [id])
+  amount        Float
+  currency      String      // "USD", "EUR"
+  direction     String      // "INFLOW", "OUTFLOW"
+  status        String      // "PENDING", "SUCCESS", "FAILED"
+  trackingRef   String?     // Wire reference code
+  usdcTxHash    String?     // Minted USDC Tx hash or burned USDC Tx hash
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}

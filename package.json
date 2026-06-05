@@ -23,8 +23,10 @@
   "dependencies": {
     "@circle-fin/developer-controlled-wallets": "^1.2.0",
     "@circle-fin/gateway": "file:./mocks/gateway",
+    "@prisma/client": "^5.22.0",
     "dotenv": "^16.4.5",
-    "ethers": "^6.12.1"
+    "ethers": "^6.12.1",
+    "prisma": "^5.22.0"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
