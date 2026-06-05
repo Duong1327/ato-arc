@@ -288,6 +288,46 @@ export default function App() {
   const [withdrawalLimit] = useState<number>(50000);
   const [multiSigApproved, setMultiSigApproved] = useState(false);
 
+  // Circle Gas Station / Paymaster State
+  const [paymasterStatus, setPaymasterStatus] = useState<'ACTIVE' | 'DEPLETED'>('ACTIVE');
+  const [sponsoredTxCount, setSponsoredTxCount] = useState<number>(24);
+  const [totalSponsoredGas, setTotalSponsoredGas] = useState<number>(62.45);
+  const [paymasterBalance, setPaymasterBalance] = useState<number>(437.55);
+  const [paymasterPolicyId, setPaymasterPolicyId] = useState<string>('pol_gas_station_ato_registered');
+  const [paymasterLoading, setPaymasterLoading] = useState<boolean>(false);
+
+  const fetchPaymasterStatus = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/paymaster/status');
+      if (res.ok) {
+        const data = await res.json();
+        setPaymasterStatus(data.status);
+        setSponsoredTxCount(data.sponsoredTxCount);
+        setTotalSponsoredGas(data.totalSponsoredGas);
+        setPaymasterBalance(data.paymasterBalance);
+        setPaymasterPolicyId(data.policyId);
+      }
+    } catch (err) {
+      console.error("Error fetching paymaster status:", err);
+    }
+  };
+
+  const handleTogglePaymaster = async () => {
+    try {
+      setPaymasterLoading(true);
+      const res = await fetch('http://localhost:3001/api/paymaster/toggle', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setPaymasterStatus(data.status);
+        addLog('SYSTEM', `Circle Paymaster simulation updated: Now ${data.status}.`, 'INFO');
+      }
+    } catch (err) {
+      console.error("Error toggling paymaster:", err);
+    } finally {
+      setPaymasterLoading(false);
+    }
+  };
+
   // Compliance Address Registry (Mock Pre-flight registry for Sandbox Mode)
   const [complianceRegistry, setComplianceRegistry] = useState<ComplianceAddress[]>([
     { address: '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a', label: 'Acme Tech Solutions', isBlocklisted: false },
@@ -738,6 +778,10 @@ export default function App() {
   useEffect(() => {
     fetchAllOnChainMilestones();
   }, [vaultAddress, milestoneCountVal, isConnected, publicClient]);
+
+  useEffect(() => {
+    fetchPaymasterStatus();
+  }, [vaultAddress]);
 
   // Load multisig proposals dynamically from the blockchain if a vault is loaded!
   useEffect(() => {
@@ -1951,14 +1995,37 @@ export default function App() {
             }));
             addLog('SYSTEM', `Proposal #${proposalId} approved successfully!`, 'SUCCESS');
           } else {
-            const tx = await writeContract({
-              address: vaultAddress as `0x${string}`,
-              abi: ATO_VAULT_ABI,
-              functionName: 'approveProposal',
-              args: [BigInt(proposalId)]
-            });
-            addLog('SYSTEM', `Approve broadcasted! Hash: ${tx}`, 'SUCCESS');
-            refetchProposalCount();
+            // Route through backend Circle Gas Station / Paymaster API
+            try {
+              addLog('SYSTEM', `[Paymaster] Sponsoring transaction for Approve Proposal #${proposalId} via Circle Gas Station API...`, 'INFO');
+              const res = await fetch('http://localhost:3001/api/paymaster/sponsor', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contractAddress: vaultAddress,
+                  functionName: 'approveProposal',
+                  args: [proposalId]
+                })
+              });
+              const result = await res.json();
+              if (res.ok && result.success) {
+                addLog('SYSTEM', `[Paymaster] Gasless override successful! Hash: ${result.txHash} (Gas sponsored by Circle Paymaster)`, 'SUCCESS');
+                refetchProposalCount();
+                fetchPaymasterStatus();
+              } else {
+                throw new Error(result.error || 'Sponsorship rejected');
+              }
+            } catch (paymasterErr: any) {
+              addLog('SYSTEM', `[Paymaster Fallback] Sponsorship unavailable (${paymasterErr.message || paymasterErr}). Initiating standard user-paid transaction...`, 'WARNING');
+              const tx = await writeContract({
+                address: vaultAddress as `0x${string}`,
+                abi: ATO_VAULT_ABI,
+                functionName: 'approveProposal',
+                args: [BigInt(proposalId)]
+              });
+              addLog('SYSTEM', `Approve broadcasted! Hash: ${tx}`, 'SUCCESS');
+              refetchProposalCount();
+            }
           }
         } catch (err: any) {
           addLog('SYSTEM', `Approve failed: ${err.message || err}`, 'ERROR');
@@ -2000,15 +2067,39 @@ export default function App() {
             }));
             addLog('SYSTEM', `Proposal #${proposalId} executed successfully on-chain!`, 'SUCCESS');
           } else {
-            const tx = await writeContract({
-              address: vaultAddress as `0x${string}`,
-              abi: ATO_VAULT_ABI,
-              functionName: 'executeProposal',
-              args: [BigInt(proposalId)]
-            });
-            addLog('SYSTEM', `Execute transaction broadcasted! Hash: ${tx}`, 'SUCCESS');
-            refetchProposalCount();
-            refetchVaultBalances();
+            // Route through backend Circle Gas Station / Paymaster API
+            try {
+              addLog('SYSTEM', `[Paymaster] Sponsoring transaction for Execute Proposal #${proposalId} via Circle Gas Station API...`, 'INFO');
+              const res = await fetch('http://localhost:3001/api/paymaster/sponsor', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contractAddress: vaultAddress,
+                  functionName: 'executeProposal',
+                  args: [proposalId]
+                })
+              });
+              const result = await res.json();
+              if (res.ok && result.success) {
+                addLog('SYSTEM', `[Paymaster] Gasless override successful! Hash: ${result.txHash} (Gas sponsored by Circle Paymaster)`, 'SUCCESS');
+                refetchProposalCount();
+                refetchVaultBalances();
+                fetchPaymasterStatus();
+              } else {
+                throw new Error(result.error || 'Sponsorship rejected');
+              }
+            } catch (paymasterErr: any) {
+              addLog('SYSTEM', `[Paymaster Fallback] Sponsorship unavailable (${paymasterErr.message || paymasterErr}). Initiating standard user-paid transaction...`, 'WARNING');
+              const tx = await writeContract({
+                address: vaultAddress as `0x${string}`,
+                abi: ATO_VAULT_ABI,
+                functionName: 'executeProposal',
+                args: [BigInt(proposalId)]
+              });
+              addLog('SYSTEM', `Execute transaction broadcasted! Hash: ${tx}`, 'SUCCESS');
+              refetchProposalCount();
+              refetchVaultBalances();
+            }
           }
         } catch (err: any) {
           addLog('SYSTEM', `Execution failed: ${err.message || err}`, 'ERROR');
@@ -3101,9 +3192,16 @@ export default function App() {
                                 Amount: {p.amountERC20.toLocaleString()} USDC
                               </p>
                             </div>
-                            <span className={`badge ${p.executed ? 'badge-green' : 'badge-pink'}`}>
-                              {p.executed ? 'Completed' : 'Needs Approval'}
-                            </span>
+                             <span style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                              {paymasterStatus === 'ACTIVE' && !p.executed && (
+                                <span className="badge badge-cyan" style={{ fontSize: '0.55rem', padding: '0.15rem 0.35rem' }}>
+                                  ⚡ Sponsored Gas
+                                </span>
+                              )}
+                              <span className={`badge ${p.executed ? 'badge-green' : 'badge-pink'}`}>
+                                {p.executed ? 'Completed' : 'Needs Approval'}
+                              </span>
+                             </span>
                           </div>
 
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.75rem', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '0.5rem' }}>
@@ -3140,64 +3238,121 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Propose Form */}
-              <div className="glass-panel">
-                <div>
-                  <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Request a Large Payment</h3>
-                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>Payments over $5,000 need team approval before they're sent.</p>
+              {/* Right Column: Propose Form + Paymaster Console */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                {/* Propose Form */}
+                <div className="glass-panel">
+                  <div>
+                    <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Request a Large Payment</h3>
+                    <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>Payments over $5,000 need team approval before they're sent.</p>
+                  </div>
+
+                  <form onSubmit={handleProposeTransaction} className="form-container">
+                    <div className="form-group">
+                      <label>Recipient Account</label>
+                      <input 
+                        type="text" 
+                        value={newPropRecipient}
+                        onChange={e => setNewPropRecipient(e.target.value)}
+                        placeholder="0x..."
+                        className="form-input" 
+                        required
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>Amount (USDC)</label>
+                      <input 
+                        type="number" 
+                        value={newPropAmount}
+                        onChange={e => setNewPropAmount(e.target.value)}
+                        placeholder="e.g. 15000"
+                        className="form-input" 
+                        required
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>Additional Data (optional)</label>
+                      <input 
+                        type="text" 
+                        value={newPropData}
+                        onChange={e => setNewPropData(e.target.value)}
+                        className="form-input" 
+                        style={{ fontFamily: 'var(--font-mono)' }}
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexDirection: 'row' }}>
+                      <input 
+                        type="checkbox"
+                        id="nativeGasTx"
+                        checked={newPropIsNativeGas}
+                        onChange={e => setNewPropIsNativeGas(e.target.checked)}
+                        style={{ accentColor: 'var(--accent-pink)' }}
+                      />
+                      <label htmlFor="nativeGasTx" style={{ margin: 0, cursor: 'pointer' }}>This is an operations fund transfer (for transaction fees)</label>
+                    </div>
+
+                    <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
+                      Submit for Approval
+                    </button>
+                  </form>
                 </div>
 
-                <form onSubmit={handleProposeTransaction} className="form-container">
-                  <div className="form-group">
-                    <label>Recipient Account</label>
-                    <input 
-                      type="text" 
-                      value={newPropRecipient}
-                      onChange={e => setNewPropRecipient(e.target.value)}
-                      placeholder="0x..."
-                      className="form-input" 
-                      required
-                    />
+                {/* Circle Paymaster Console */}
+                <div className="glass-panel" style={{ border: '1px solid rgba(0, 240, 255, 0.15)', boxShadow: '0 0 20px rgba(0, 240, 255, 0.03)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h3 className="metric-label" style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '0.4rem', margin: 0 }}>
+                      ⛽ Circle Paymaster
+                    </h3>
+                    <span className={`badge ${paymasterStatus === 'ACTIVE' ? 'badge-cyan' : 'badge-red'}`} style={{ fontSize: '0.58rem', letterSpacing: '0.05em' }}>
+                      {paymasterStatus === 'ACTIVE' ? '● ACTIVE' : '● DEPLETED'}
+                    </span>
+                  </div>
+                  
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', margin: 0 }}>
+                    Sponsors gas fees for governance actions (Approvals and Executions) on Arc Testnet via Circle Paymaster policies.
+                  </p>
+
+                  <div style={{ background: 'rgba(255,255,255,0.01)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)', fontSize: '0.62rem', display: 'flex', flexDirection: 'column', gap: '0.4rem', fontFamily: 'var(--font-mono)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>Policy ID:</span>
+                      <span style={{ color: '#fff', fontSize: '0.58rem' }}>{paymasterPolicyId.slice(0, 20)}...</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>Remaining Budget:</span>
+                      <strong style={{ color: paymasterStatus === 'ACTIVE' ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                        ${paymasterBalance.toFixed(2)} USDC
+                      </strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>Total Sponsored Gas:</span>
+                      <span style={{ color: 'var(--text-secondary)' }}>${totalSponsoredGas.toFixed(2)} USDC</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>Sponsored Tx Count:</span>
+                      <span style={{ color: 'var(--accent-cyan)' }}>{sponsoredTxCount} txns</span>
+                    </div>
                   </div>
 
-                  <div className="form-group">
-                    <label>Amount (USDC)</label>
-                    <input 
-                      type="number" 
-                      value={newPropAmount}
-                      onChange={e => setNewPropAmount(e.target.value)}
-                      placeholder="e.g. 15000"
-                      className="form-input" 
-                      required
-                    />
-                  </div>
-
-                  <div className="form-group">
-                    <label>Additional Data (optional)</label>
-                    <input 
-                      type="text" 
-                      value={newPropData}
-                      onChange={e => setNewPropData(e.target.value)}
-                      className="form-input" 
-                      style={{ fontFamily: 'var(--font-mono)' }}
-                    />
-                  </div>
-
-                  <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexDirection: 'row' }}>
-                    <input 
-                      type="checkbox"
-                      id="nativeGasTx"
-                      checked={newPropIsNativeGas}
-                      onChange={e => setNewPropIsNativeGas(e.target.checked)}
-                      style={{ accentColor: 'var(--accent-pink)' }}
-                    />
-                    <label htmlFor="nativeGasTx" style={{ margin: 0, cursor: 'pointer' }}>This is an operations fund transfer (for transaction fees)</label>
-                  </div>
-
-                  <button type="submit" className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem' }}>
-                    Submit for Approval
+                  <button 
+                    type="button" 
+                    onClick={handleTogglePaymaster}
+                    disabled={paymasterLoading}
+                    className="hex-blueprint-btn" 
+                    style={{ 
+                      fontSize: '0.68rem', 
+                      padding: '0.5rem', 
+                      borderColor: paymasterStatus === 'ACTIVE' ? 'var(--accent-pink)' : 'var(--accent-green)',
+                      color: paymasterStatus === 'ACTIVE' ? 'var(--accent-pink)' : 'var(--accent-green)',
+                      background: 'transparent',
+                      width: '100%'
+                    }}
+                  >
+                    {paymasterLoading ? 'Updating System...' : paymasterStatus === 'ACTIVE' ? '⚠️ Simulate Paymaster Depletion' : '⚡ Reactivate Paymaster'}
                   </button>
-                </form>
+                </div>
               </div>
 
             </div>
