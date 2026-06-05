@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { handleWebhook } from './webhookHandler';
 import { BankIntegrator } from '../../scripts/bankIntegrator';
+import { ethers } from 'ethers';
 
 dotenv.config();
 
@@ -278,6 +279,94 @@ app.post('/api/simulate-webhook', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message, details: error.response?.data });
+  }
+});
+
+// Paymaster State variables (simulating Circle Gas Station reserves and settings)
+let paymasterDepleted = false;
+let sponsoredTxCount = 24;
+let totalSponsoredGas = 62.45; // USD/USDC
+let paymasterBalance = 437.55; // USDC remaining budget
+
+// Paymaster & Gas Station Status API
+app.get('/api/paymaster/status', (req: Request, res: Response) => {
+  res.json({
+    status: paymasterDepleted ? 'DEPLETED' : 'ACTIVE',
+    sponsoredTxCount,
+    totalSponsoredGas,
+    paymasterBalance,
+    policyId: process.env.CIRCLE_PAYMASTER_POLICY_ID || 'pol_gas_station_ato_registered'
+  });
+});
+
+// Toggle Paymaster Funds (to simulate depletion & test EOA fallbacks)
+app.post('/api/paymaster/toggle', (req: Request, res: Response) => {
+  paymasterDepleted = !paymasterDepleted;
+  res.json({
+    success: true,
+    status: paymasterDepleted ? 'DEPLETED' : 'ACTIVE',
+    message: `Paymaster simulation toggled. Status is now: ${paymasterDepleted ? 'DEPLETED' : 'ACTIVE'}`
+  });
+});
+
+// Paymaster Sponsor/Relayer Wrapper Endpoint
+app.post('/api/paymaster/sponsor', async (req: Request, res: Response) => {
+  const { contractAddress, functionName, args } = req.body;
+  if (!contractAddress || !functionName || !args) {
+    return res.status(400).json({ error: 'Missing required contractAddress, functionName, or args fields.' });
+  }
+
+  if (paymasterDepleted) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Paymaster funds depleted. Standard user-paid gas fallback triggered.' 
+    });
+  }
+
+  try {
+    const provider = new ethers.JsonRpcProvider(process.env.ARC_TESTNET_RPC_URL || 'https://rpc.testnet.arc.network');
+    const privateKey = process.env.PRIVATE_KEY;
+    if (!privateKey) {
+      throw new Error("PRIVATE_KEY not defined in backend configuration.");
+    }
+    const wallet = new ethers.Wallet(privateKey, provider);
+
+    const abi = [
+      "function approveProposal(uint256 proposalId) external",
+      "function executeProposal(uint256 proposalId) external returns (bool)"
+    ];
+    const contract = new ethers.Contract(contractAddress, abi, wallet);
+
+    console.log(`[Paymaster Sponsor Wrapper] Invoking ${functionName} with args:`, args);
+
+    let tx: any;
+    if (functionName === 'approveProposal') {
+      tx = await contract.approveProposal(BigInt(args[0]));
+    } else if (functionName === 'executeProposal') {
+      tx = await contract.executeProposal(BigInt(args[0]));
+    } else {
+      return res.status(400).json({ error: `Function ${functionName} is not supported for gasless override sponsorship.` });
+    }
+
+    const receipt = await tx.wait();
+    
+    // Increment stats
+    sponsoredTxCount++;
+    totalSponsoredGas += 1.85; // Simulated sponsored txn gas in USDC
+    paymasterBalance = Math.max(0, paymasterBalance - 1.85);
+
+    res.json({
+      success: true,
+      txHash: tx.hash,
+      blockNumber: receipt.blockNumber,
+      message: 'Transaction sponsored successfully by Circle Gas Station.'
+    });
+  } catch (error: any) {
+    console.error(`[Paymaster Error] Relayer error:`, error.message || error);
+    res.status(500).json({ 
+      success: false, 
+      error: `Gas sponsorship relay failed: ${error.message || error}. Falling back to standard wallet transaction.` 
+    });
   }
 });
 
