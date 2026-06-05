@@ -742,7 +742,168 @@ app.post('/api/factoring/buy', async (req: Request, res: Response) => {
   }
 });
 
+// --- MULTI-TOKEN INDEX MANAGER ENDPOINTS ---
+import { IndexManager } from '../../scripts/indexManager';
+
+const VAULT_CONTRACT_ADDRESS = process.env.VAULT_CONTRACT_ADDRESS || '0x49B50855Aa3bE2F677cD6303Cec089B5F319D72a';
+
+let pendingIndexProposal: {
+
+  allocations: { tokenAddress: string; targetWeight: number }[];
+  approvals: string[];
+} | null = null;
+
+app.get('/api/index/allocations', async (req: Request, res: Response) => {
+  try {
+    const allocations = await IndexManager.reconcileBalances();
+    res.json(allocations);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/index/proposal', (req: Request, res: Response) => {
+  res.json(pendingIndexProposal);
+});
+
+app.post('/api/index/proposal', (req: Request, res: Response) => {
+  const { allocations, creator } = req.body;
+  if (!allocations || !Array.isArray(allocations)) {
+    return res.status(400).json({ error: 'Missing allocations array' });
+  }
+
+  // Validate sum is exactly 100%
+  const totalWeight = allocations.reduce((sum: number, a: any) => sum + parseFloat(a.targetWeight), 0);
+  if (Math.abs(totalWeight - 100) > 0.01) {
+    return res.status(400).json({ error: 'Target weights must sum to exactly 100%' });
+  }
+
+  pendingIndexProposal = {
+    allocations: allocations.map((a: any) => ({
+      tokenAddress: a.tokenAddress,
+      targetWeight: parseFloat(a.targetWeight)
+    })),
+    approvals: [creator || 'Owner 1']
+  };
+
+  res.json({
+    success: true,
+    message: 'Target allocations proposed. Requires multi-sig approval.',
+    proposal: pendingIndexProposal
+  });
+});
+
+app.post('/api/index/proposal/approve', async (req: Request, res: Response) => {
+  const { approver } = req.body;
+  if (!pendingIndexProposal) {
+    return res.status(400).json({ error: 'No pending index allocation proposal exists.' });
+  }
+
+  const activeApprover = approver || 'Owner 2';
+  if (pendingIndexProposal.approvals.includes(activeApprover)) {
+    return res.status(400).json({ error: 'Approver has already signed off on this proposal.' });
+  }
+
+  pendingIndexProposal.approvals.push(activeApprover);
+
+  if (pendingIndexProposal.approvals.length >= 2) {
+    try {
+      // 1. Update Database
+      for (const item of pendingIndexProposal.allocations) {
+        await prisma.indexAllocation.update({
+          where: { tokenAddress: item.tokenAddress },
+          data: { targetWeight: item.targetWeight }
+        });
+      }
+
+      // 2. Update Smart Contract (Owner override)
+      try {
+        const privateKey = process.env.PRIVATE_KEY || process.env.OWNER_PRIVATE_KEY;
+        if (privateKey) {
+          const provider = new ethers.JsonRpcProvider(process.env.ARC_TESTNET_RPC_URL || 'https://rpc.testnet.arc.network');
+          const wallet = new ethers.Wallet(privateKey, provider);
+          const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, [
+            "function setTargetWeights(address[] calldata tokens, uint256[] calldata weights) external"
+          ], wallet);
+          
+          const tokens = pendingIndexProposal.allocations.map(a => a.tokenAddress);
+          // percentage to basis points (e.g. 60.0% -> 6000 bps)
+          const weights = pendingIndexProposal.allocations.map(a => Math.round(a.targetWeight * 100));
+          const tx = await vaultContract.setTargetWeights(tokens, weights);
+          await tx.wait();
+          console.log(`[API Index Settings] On-chain setTargetWeights transaction confirmed: ${tx.hash}`);
+        }
+      } catch (contractErr: any) {
+        console.warn(`[API Index Settings] On-chain update failed or skipped: ${contractErr.message}`);
+      }
+
+      const updatedAllocations = await IndexManager.reconcileBalances();
+      pendingIndexProposal = null;
+
+      return res.json({
+        success: true,
+        applied: true,
+        message: 'Index allocations approved and successfully applied.',
+        allocations: updatedAllocations
+      });
+    } catch (error: any) {
+      return res.status(500).json({ error: error.message });
+    }
+  }
+
+  res.json({
+    success: true,
+    applied: false,
+    message: `Proposal approved by ${activeApprover}. Current sign-offs: ${pendingIndexProposal.approvals.length}/2`,
+    proposal: pendingIndexProposal
+  });
+});
+
+app.get('/api/index/history', async (req: Request, res: Response) => {
+  try {
+    const history = await prisma.rebalanceLog.findMany({
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(history);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/index/rebalance', async (req: Request, res: Response) => {
+  try {
+    const result = await IndexManager.checkAndRebalanceIndex(5.0, 0.5);
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/index/simulate-drift', async (req: Request, res: Response) => {
+  try {
+    // Modify balances in DB directly to simulate a drift (e.g. high EURC balance)
+    await prisma.indexAllocation.update({
+      where: { tokenAddress: '0x3600000000000000000000000000000000000000' }, // USDC
+      data: { balance: 3000.0, currentWeight: 30.0 }
+    });
+    await prisma.indexAllocation.update({
+      where: { tokenAddress: '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a' }, // EURC
+      data: { balance: 7000.0 / 1.08, currentWeight: 70.0 } // 70% EURC, creating a drift
+    });
+
+    const currentAllocations = await prisma.indexAllocation.findMany();
+    res.json({
+      success: true,
+      message: 'Drift simulation applied. EURC balance artificially inflated in DB to create drift.',
+      allocations: currentAllocations
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Start server if not running tests
+
 let server: any;
 if (process.env.NODE_ENV !== 'test') {
   server = app.listen(PORT, () => {
