@@ -24,9 +24,15 @@ const provider = new ethers.JsonRpcProvider(ARC_TESTNET_RPC_URL);
 // Contract ABI fragments for transaction construction and pre-flight validation
 const VAULT_ABI = [
     "function getTreasuryBalances() external view returns (uint256 erc20Balance, uint256 nativeGasBalance)",
+    "function getTreasuryBalances(address token) external view returns (uint256 erc20Balance, uint256 nativeGasBalance)",
     "function agentDirectPayoutERC20(address recipient, uint256 amountERC20, uint256 nonce, bytes calldata signature) external returns (bool)",
     "function agentDirectPayoutERC20(address recipient, uint256 amountERC20, uint256 nonce, address agent, bytes calldata signature) external returns (bool)",
+    "function agentDirectPayoutToken(address token, address recipient, uint256 amountERC20, uint256 nonce, bytes calldata signature) external returns (bool)",
+    "function agentDirectPayoutToken(address token, address recipient, uint256 amountERC20, uint256 nonce, address agent, bytes calldata signature) external returns (bool)",
     "function agentExecuteMilestonePayout(uint256 milestoneId, address recipient, uint256 amountERC20) external returns (bool)",
+    "function executeFxTrade(address sellToken, address buyToken, uint256 sellAmount, uint256 minBuyAmount, address recipient) external returns (uint256 buyAmountBought)",
+    "function stableFXAddress() external view returns (address)",
+    "function isTokenRegistered(address token) external view returns (bool)",
     "function isAddressBlocklisted(address target) external view returns (bool)",
     "function updateComplianceBlocklist(address target, bool isBlocklisted) external",
     "function complianceOracleAddress() external view returns (address)",
@@ -49,9 +55,10 @@ const circleClient = initiateDeveloperControlledWalletsClient({
 interface InvoicePayload {
     id: string;
     recipientAddress: string;
-    amountUSDC: number; // 6-decimal standard representation (e.g., 250.50 USDC)
+    amountUSDC: number; // 6-decimal representation (e.g., 250.50 tokens)
     type: 'payroll' | 'supplier' | 'milestone';
     milestoneId?: number;
+    tokenAddress?: string; // Optional token address, defaults to USDC if not provided
 }
 
 // --- DUAL-DECIMAL MATH UTILITIES ---
@@ -104,15 +111,23 @@ class AgentAuditor {
         // 2. Fetch on-chain balance of the treasury contract
         try {
             const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
-            const [erc20Balance, nativeGasBalance] = await vaultContract.getTreasuryBalances();
+            const token = invoice.tokenAddress || ERC20_USDC_ADDRESS;
+
+            // Currency verification: Check if token is registered in the compliance registry
+            const isRegistered = await vaultContract.isTokenRegistered(token);
+            if (!isRegistered) {
+                return { isValid: false, reason: `Token ${token} is not registered in the Vault compliance registry.` };
+            }
+
+            const [erc20Balance, nativeGasBalance] = await vaultContract.getTreasuryBalances(token);
             
-            console.log(`[Agent Alpha] On-Chain Treasury Assets:`);
-            console.log(`  - ERC-20 Vault Balance: ${DecimalManager.formatERC20Units(erc20Balance)} USDC`);
+            console.log(`[Agent Alpha] On-Chain Treasury Assets for Token ${token}:`);
+            console.log(`  - ERC-20 Vault Balance: ${DecimalManager.formatERC20Units(erc20Balance)} units`);
             console.log(`  - L1 Native Gas Balance: ${ethers.formatUnits(nativeGasBalance, ARC_NATIVE_GAS_DECIMALS)} USDC`);
 
             const requiredERC20 = DecimalManager.toERC20Units(invoice.amountUSDC);
             if (erc20Balance < requiredERC20) {
-                return { isValid: false, reason: `Insufficient ERC-20 vault balance. Required: ${invoice.amountUSDC} USDC, Available: ${DecimalManager.formatERC20Units(erc20Balance)}` };
+                return { isValid: false, reason: `Insufficient ERC-20 vault balance. Required: ${invoice.amountUSDC} units, Available: ${DecimalManager.formatERC20Units(erc20Balance)}` };
             }
 
             console.log(`[Agent Alpha] Audit passed. Funds available.`);
@@ -248,6 +263,7 @@ class AgentAllocator {
     async executeAutonomousTreasuryPayment(invoice: InvoicePayload) {
         console.log(`[Agent Gamma - The Allocator] Structuring execution for Invoice ${invoice.id}...`);
 
+        const tokenAddress = invoice.tokenAddress || ERC20_USDC_ADDRESS;
         const amountERC20Units = DecimalManager.toERC20Units(invoice.amountUSDC);
         const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
         
@@ -267,27 +283,48 @@ class AgentAllocator {
             ]);
             console.log(`[Agent Gamma] Encoded payout function: agentExecuteMilestonePayout(${invoice.milestoneId}, ${invoice.recipientAddress}, ${amountERC20Units} units)`);
         } else {
-            sigInfo = await this.getSignatureAndNonce(invoice.recipientAddress, amountERC20Units, VAULT_CONTRACT_ADDRESS);
+            sigInfo = await this.getSignatureAndNonce(invoice.recipientAddress, amountERC20Units, VAULT_CONTRACT_ADDRESS, tokenAddress);
             signature = sigInfo.signature;
             nonce = sigInfo.nonce;
 
             const isSmartContract = (await provider.getCode(sigInfo.agentAddress)) !== '0x';
 
-            if (isSmartContract) {
-                txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutERC20(address,uint256,uint256,address,bytes)', [
-                    invoice.recipientAddress,
-                    amountERC20Units,
-                    nonce,
-                    sigInfo.agentAddress,
-                    signature
-                ]);
+            if (tokenAddress === ERC20_USDC_ADDRESS) {
+                if (isSmartContract) {
+                    txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutERC20(address,uint256,uint256,address,bytes)', [
+                        invoice.recipientAddress,
+                        amountERC20Units,
+                        nonce,
+                        sigInfo.agentAddress,
+                        signature
+                    ]);
+                } else {
+                    txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutERC20(address,uint256,uint256,bytes)', [
+                        invoice.recipientAddress,
+                        amountERC20Units,
+                        nonce,
+                        signature
+                    ]);
+                }
             } else {
-                txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutERC20(address,uint256,uint256,bytes)', [
-                    invoice.recipientAddress,
-                    amountERC20Units,
-                    nonce,
-                    signature
-                ]);
+                if (isSmartContract) {
+                    txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutToken(address,address,uint256,uint256,address,bytes)', [
+                        tokenAddress,
+                        invoice.recipientAddress,
+                        amountERC20Units,
+                        nonce,
+                        sigInfo.agentAddress,
+                        signature
+                    ]);
+                } else {
+                    txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutToken(address,address,uint256,uint256,bytes)', [
+                        tokenAddress,
+                        invoice.recipientAddress,
+                        amountERC20Units,
+                        nonce,
+                        signature
+                    ]);
+                }
             }
             console.log(`[Agent Gamma] Generated Agent Cryptographic Signature for transaction approval:`);
             console.log(`  - Signer Address: ${sigInfo.agentAddress} (${isSmartContract ? 'Smart Contract' : 'EOA'})`);
@@ -300,15 +337,35 @@ class AgentAllocator {
         try {
             const isSmartContract = invoice.type !== 'milestone' && sigInfo && (await provider.getCode(sigInfo.agentAddress)) !== '0x';
 
+            let abiSignature: string;
+            let abiParams: any[];
+
+            if (invoice.type === 'milestone') {
+                abiSignature = 'agentExecuteMilestonePayout(uint256,address,uint256)';
+                abiParams = [invoice.milestoneId!.toString(), invoice.recipientAddress, amountERC20Units.toString()];
+            } else if (tokenAddress === ERC20_USDC_ADDRESS) {
+                if (isSmartContract) {
+                    abiSignature = 'agentDirectPayoutERC20(address,uint256,uint256,address,bytes)';
+                    abiParams = [invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), sigInfo.agentAddress, signature];
+                } else {
+                    abiSignature = 'agentDirectPayoutERC20(address,uint256,uint256,bytes)';
+                    abiParams = [invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), signature];
+                }
+            } else {
+                if (isSmartContract) {
+                    abiSignature = 'agentDirectPayoutToken(address,address,uint256,uint256,address,bytes)';
+                    abiParams = [tokenAddress, invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), sigInfo.agentAddress, signature];
+                } else {
+                    abiSignature = 'agentDirectPayoutToken(address,address,uint256,uint256,bytes)';
+                    abiParams = [tokenAddress, invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), signature];
+                }
+            }
+
             const response = await circleClient.createContractExecutionTransaction({
                 walletId: this.walletId,
                 contractAddress: VAULT_CONTRACT_ADDRESS,
-                abiFunctionSignature: invoice.type === 'milestone' 
-                    ? 'agentExecuteMilestonePayout(uint256,address,uint256)' 
-                    : (isSmartContract ? 'agentDirectPayoutERC20(address,uint256,uint256,address,bytes)' : 'agentDirectPayoutERC20(address,uint256,uint256,bytes)'),
-                abiParameters: invoice.type === 'milestone' 
-                    ? [invoice.milestoneId!, invoice.recipientAddress, amountERC20Units.toString()] 
-                    : (isSmartContract ? [invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), sigInfo.agentAddress, signature] : [invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), signature]),
+                abiFunctionSignature: abiSignature,
+                abiParameters: abiParams,
                 fee: {
                     type: 'level',
                     config: {
@@ -357,7 +414,73 @@ class AgentAllocator {
         }
     }
 
-    private async getSignatureAndNonce(recipient: string, amount: bigint, vaultAddress: string) {
+    /**
+     * Monitors vault currency balances and automatically triggers StableFX swaps
+     * to sweep EURC to USDC when a threshold is breached.
+     */
+    async checkAndRebalanceTreasury(thresholdEURC: number = 1000) {
+        console.log(`[Agent Gamma - The Allocator] Checking treasury balances for sweep rebalancing...`);
+        const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
+        
+        try {
+            const EURC_ADDRESS = '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a';
+            const USDC_ADDRESS = '0x3600000000000000000000000000000000000000';
+            
+            const eurcBalances = await vaultContract.getTreasuryBalances(EURC_ADDRESS);
+            const eurcBalance = Number(ethers.formatUnits(eurcBalances.erc20Balance, 6));
+            
+            console.log(`[Agent Gamma] Vault EURC Balance: ${eurcBalance} EURC. Rebalance Threshold: ${thresholdEURC} EURC.`);
+            
+            if (eurcBalance >= thresholdEURC) {
+                console.log(`[Agent Gamma] Threshold breached! Initiating automatic StableFX sweep to USDC...`);
+                
+                const sellAmount = eurcBalances.erc20Balance;
+                
+                const fxAddress = await vaultContract.stableFXAddress();
+                if (fxAddress === ethers.ZeroAddress) {
+                    console.warn(`[Agent Gamma] StableFX Address not configured in Vault. Rebalancing aborted.`);
+                    return;
+                }
+                
+                const fxContract = new ethers.Contract(fxAddress, [
+                    "function getFXQuote(address sellToken, address buyToken, uint256 sellAmount) external view returns (uint256 buyAmount, uint256 rate)"
+                ], provider);
+                
+                const quote = await fxContract.getFXQuote(EURC_ADDRESS, USDC_ADDRESS, sellAmount);
+                const minBuyAmount = (quote.buyAmount * 95n) / 100n; // 5% slippage tolerance
+                
+                console.log(`[Agent Gamma] Quoted Rate: ${ethers.formatUnits(quote.rate, 18)}. Min Buy Amount: ${ethers.formatUnits(minBuyAmount, 6)} USDC.`);
+                
+                const response = await circleClient.createContractExecutionTransaction({
+                    walletId: this.walletId,
+                    contractAddress: VAULT_CONTRACT_ADDRESS,
+                    abiFunctionSignature: 'executeFxTrade(address,address,uint256,uint256,address)',
+                    abiParameters: [
+                        EURC_ADDRESS,
+                        USDC_ADDRESS,
+                        sellAmount.toString(),
+                        minBuyAmount.toString(),
+                        VAULT_CONTRACT_ADDRESS // Sweeps swapped USDC directly back to Vault
+                    ],
+                    fee: {
+                        type: 'level',
+                        config: {
+                            feeLevel: 'MEDIUM'
+                        }
+                    }
+                });
+                
+                console.log(`[Agent Gamma] Rebalance trade transaction broadcasted successfully. Tx ID: ${response.data?.id}`);
+                return response.data;
+            } else {
+                console.log(`[Agent Gamma] Balances within normal ranges. No rebalancing sweep needed.`);
+            }
+        } catch (error: any) {
+            console.error(`[Agent Gamma] Rebalancing sweep check failed:`, error.message || error);
+        }
+    }
+
+    private async getSignatureAndNonce(recipient: string, amount: bigint, vaultAddress: string, token: string = ERC20_USDC_ADDRESS) {
         const agentPrivateKey = process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY;
         if (!agentPrivateKey) {
             throw new Error("AGENT_PRIVATE_KEY or PRIVATE_KEY must be set in .env for signing.");
@@ -369,10 +492,18 @@ class AgentAllocator {
         const network = await provider.getNetwork();
         const chainId = network.chainId;
 
-        const messageHash = ethers.solidityPackedKeccak256(
-            ['address', 'uint256', 'uint256', 'address', 'uint256'],
-            [recipient, amount, nonce, vaultAddress, chainId]
-        );
+        let messageHash;
+        if (token === ERC20_USDC_ADDRESS) {
+            messageHash = ethers.solidityPackedKeccak256(
+                ['address', 'uint256', 'uint256', 'address', 'uint256'],
+                [recipient, amount, nonce, vaultAddress, chainId]
+            );
+        } else {
+            messageHash = ethers.solidityPackedKeccak256(
+                ['address', 'address', 'uint256', 'uint256', 'address', 'uint256'],
+                [token, recipient, amount, nonce, vaultAddress, chainId]
+            );
+        }
         const signature = await agentSigner.signMessage(ethers.getBytes(messageHash));
         return { signature, nonce, agentAddress };
     }
