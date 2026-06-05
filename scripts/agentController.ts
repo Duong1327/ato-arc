@@ -6,6 +6,7 @@ import { GatewayBillingManager } from './gatewayBilling';
 import { CircleGatewaySDK } from '@circle-fin/gateway';
 import { BankIntegrator } from './bankIntegrator';
 import { PrismaClient } from '@prisma/client';
+import { RemoteExecutionManager } from './remoteExecution';
 
 const prisma = new PrismaClient();
 
@@ -65,6 +66,7 @@ interface InvoicePayload {
     type: 'payroll' | 'supplier' | 'milestone';
     milestoneId?: number;
     tokenAddress?: string; // Optional token address, defaults to USDC if not provided
+    destChain?: string;
 }
 
 // --- DUAL-DECIMAL MATH UTILITIES ---
@@ -547,6 +549,69 @@ class AgentAllocator {
         const tokenAddress = invoice.tokenAddress || ERC20_USDC_ADDRESS;
         const amountERC20Units = DecimalManager.toERC20Units(invoice.amountUSDC);
         const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
+
+        if (invoice.destChain && invoice.destChain.toLowerCase() !== 'arc') {
+            console.log(`[Agent Gamma] DETECTED CROSS-CHAIN PAYOUT to chain: ${invoice.destChain}`);
+            console.log(`[Agent Gamma] Formatting cross-chain command via RemoteExecutor...`);
+            
+            const mockERC20Interface = new ethers.Interface(["function transfer(address,uint256)"]);
+            const payload = mockERC20Interface.encodeFunctionData('transfer', [invoice.recipientAddress, amountERC20Units]);
+
+            try {
+                const privateKey = process.env.PRIVATE_KEY || "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+                const agentSigner = new ethers.Wallet(privateKey, provider);
+                const executorAddress = process.env.REMOTE_EXECUTOR_ADDRESS || "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+                const nonce = Math.floor(Math.random() * 1000000);
+
+                console.log(`[Agent Gamma] Signing cross-chain command for executor ${executorAddress} on ${invoice.destChain}...`);
+                const { execution, signature: cmdSig, cmd } = await RemoteExecutionManager.proposeCommand(
+                    agentSigner,
+                    executorAddress,
+                    {
+                        sourceChain: "Arc",
+                        destChain: invoice.destChain,
+                        targetAddress: tokenAddress,
+                        payload,
+                        amountUSDC: invoice.amountUSDC,
+                        nonce
+                    }
+                );
+
+                console.log(`[Agent Gamma] Cross-chain command proposed and logged: ID=${execution.id}, Status=${execution.status}`);
+
+                console.log(`[Agent Gamma] Simulating CCTP execution on destination chain ${invoice.destChain}...`);
+                const execResult = await RemoteExecutionManager.executeCommand(
+                    agentSigner,
+                    executorAddress,
+                    execution.id,
+                    cmd,
+                    cmdSig
+                );
+
+                console.log(`[Agent Gamma] Cross-chain execution complete! Tx Hash: ${execResult.txHash}`);
+                return {
+                    id: execution.id,
+                    state: 'SUCCESS',
+                    blockchainTxHash: execResult.txHash,
+                    isCrossChain: true
+                };
+            } catch (err: any) {
+                console.error(`[Agent Gamma] Cross-chain execution failed:`, err.message || err);
+                throw err;
+            }
+        }
+
+        try {
+            const feeBps = await vaultContract.feeBasisPoints().catch(() => 0n);
+            const feeAmount = (amountERC20Units * feeBps) / 10000n;
+            const netAmount = amountERC20Units - feeAmount;
+            console.log(`[Agent Gamma] Transaction Fee Schedule Analysis:`);
+            console.log(`  - Vault Fee Rate: ${feeBps.toString()} bps`);
+            console.log(`  - Projected Fee: ${ethers.formatUnits(feeAmount, 6)}`);
+            console.log(`  - Projected Net Transfer: ${ethers.formatUnits(netAmount, 6)}`);
+        } catch (err: any) {
+            console.warn(`[Agent Gamma] Could not retrieve fee configurations from vault:`, err.message || err);
+        }
         
         let signature = "0x";
         let nonce = 0n;

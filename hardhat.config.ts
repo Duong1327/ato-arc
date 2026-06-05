@@ -19,6 +19,9 @@ const config: HardhatUserConfig = {
     },
   },
   networks: {
+    hardhat: {
+      allowUnlimitedContractSize: true,
+    },
     // Configured for Circle's Arc L1 Network Testnet
     arcTestnet: {
       url: ARC_TESTNET_RPC_URL,
