@@ -49,7 +49,7 @@ interface InvoiceForm {
 
 interface LogEntry {
   timestamp: string;
-  agent: 'SYSTEM' | 'AUDITOR' | 'RISK_OFFICER' | 'ALLOCATOR';
+  agent: 'SYSTEM' | 'AUDITOR' | 'RISK_OFFICER' | 'ALLOCATOR' | 'POLICY';
   message: string;
   level: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR';
 }
@@ -129,7 +129,7 @@ export default function App() {
     }
   }, [vaultAddress]);
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing' | 'webhooks' | 'banking'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing' | 'webhooks' | 'banking' | 'guardrails'>('dashboard');
 
   const [passkeyAccount, setPasskeyAccount] = useState<{
     address: string;
@@ -296,6 +296,15 @@ export default function App() {
   const [paymasterPolicyId, setPaymasterPolicyId] = useState<string>('pol_gas_station_ato_registered');
   const [paymasterLoading, setPaymasterLoading] = useState<boolean>(false);
 
+  // Circle Agent Stack & Spending Policy Guardrails States
+  const [agentPolicy, setAgentPolicy] = useState<any>(null);
+  const [pendingPolicyProposal, setPendingPolicyProposal] = useState<any>(null);
+  const [policyLimitInput, setPolicyLimitInput] = useState<string>('5000');
+  const [policyFreqInput, setPolicyFreqInput] = useState<string>('10');
+  const [policyAllowlistInput, setPolicyAllowlistInput] = useState<string>('');
+  const [policyLoading, setPolicyLoading] = useState<boolean>(false);
+  const [approverName, setApproverName] = useState<string>('Owner 2');
+
   const fetchPaymasterStatus = async () => {
     try {
       const res = await fetch('http://localhost:3001/api/paymaster/status');
@@ -309,6 +318,101 @@ export default function App() {
       }
     } catch (err) {
       console.error("Error fetching paymaster status:", err);
+    }
+  };
+
+  const fetchAgentPolicy = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/agent/policy');
+      if (res.ok) {
+        const data = await res.json();
+        setAgentPolicy(data);
+        if (!pendingPolicyProposal) {
+          setPolicyLimitInput(data.spendingLimitDailyUSDC.toString());
+          setPolicyFreqInput(data.transactionFrequencyCapPerHour.toString());
+          setPolicyAllowlistInput(data.addressAllowlist);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch agent policy:', err);
+    }
+  };
+
+  const fetchPendingPolicyProposal = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/agent/policy/proposal');
+      if (res.ok) {
+        const data = await res.json();
+        setPendingPolicyProposal(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch pending policy proposal:', err);
+    }
+  };
+
+  const proposePolicyUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPolicyLoading(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/agent/policy/proposal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          spendingLimitDailyUSDC: parseFloat(policyLimitInput),
+          transactionFrequencyCapPerHour: parseInt(policyFreqInput),
+          addressAllowlist: policyAllowlistInput,
+          creator: 'Owner 1'
+        })
+      });
+      if (res.ok) {
+        addLog('POLICY', 'Proposed new Agent spending limits. Requires multi-sig team approval.', 'INFO');
+        await fetchPendingPolicyProposal();
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPolicyLoading(false);
+    }
+  };
+
+  const approvePolicyProposal = async () => {
+    setPolicyLoading(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/agent/policy/proposal/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approver: approverName })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.applied) {
+          addLog('POLICY', 'Multi-sig policy update approved and successfully applied to Agent stack.', 'SUCCESS');
+          await fetchAgentPolicy();
+          setPendingPolicyProposal(null);
+        } else {
+          addLog('POLICY', `Approved by ${approverName}. Current approval count: 2/2.`, 'INFO');
+          await fetchPendingPolicyProposal();
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPolicyLoading(false);
+    }
+  };
+
+  const togglePolicyEnforcement = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/agent/policy/toggle-enforcement', {
+        method: 'POST'
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAgentPolicy(data);
+        addLog('POLICY', `Agent Stack Policy Enforcement toggled. Enforced: ${data.enforced}`, 'INFO');
+      }
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -781,6 +885,8 @@ export default function App() {
 
   useEffect(() => {
     fetchPaymasterStatus();
+    fetchAgentPolicy();
+    fetchPendingPolicyProposal();
   }, [vaultAddress]);
 
   // Load multisig proposals dynamically from the blockchain if a vault is loaded!
@@ -960,7 +1066,7 @@ export default function App() {
   const { writeContractAsync: writeContract } = useWriteContract();
 
   // Helpers
-  const addLog = (agent: 'SYSTEM' | 'AUDITOR' | 'RISK_OFFICER' | 'ALLOCATOR', message: string, level: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR') => {
+  const addLog = (agent: 'SYSTEM' | 'AUDITOR' | 'RISK_OFFICER' | 'ALLOCATOR' | 'POLICY', message: string, level: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR') => {
     const now = new Date();
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
     setLogs(prev => [...prev, { timestamp: timeStr, agent, message, level }]);
@@ -2611,6 +2717,17 @@ export default function App() {
                 <path d="M9 21V9" />
               </svg>
               Bank Portal
+            </button>
+
+            <button
+              onClick={() => setActiveTab('guardrails')}
+              className={`nav-button ${activeTab === 'guardrails' ? 'nav-button-active' : ''}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '0.75rem', opacity: 0.85 }}>
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              Agent Guardrails
             </button>
           </div>
 
@@ -5367,6 +5484,279 @@ export default function App() {
                         )}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 10: CIRCLE AGENT STACK & SPENDING POLICY GUARDRAILS */}
+          {activeTab === 'guardrails' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              
+              {/* Header card with Policy Status */}
+              <div className="glass-panel" style={{ padding: '1.5rem', position: 'relative', overflow: 'hidden' }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '-40px',
+                  right: '-40px',
+                  width: '160px',
+                  height: '160px',
+                  borderRadius: '50%',
+                  background: 'radial-gradient(circle, rgba(255, 46, 143, 0.08) 0%, transparent 70%)',
+                  zIndex: 0
+                }}></div>
+                <div style={{ position: 'relative', zIndex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                  <div>
+                    <h2 style={{ fontSize: '1.2rem', fontWeight: 'bold', color: '#fff' }}>Circle Agent Stack & Policy Guardrails</h2>
+                    <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                      Enforce off-chain server-side policy limits on treasury operations, transaction frequencies, and destination allowlists to prevent unauthorized asset movement.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    <button 
+                      onClick={togglePolicyEnforcement}
+                      className="hex-blueprint-btn" 
+                      style={{ 
+                        fontSize: '0.65rem', 
+                        padding: '0.35rem 0.75rem', 
+                        width: 'auto',
+                        background: agentPolicy?.enforced ? 'rgba(57,255,20,0.05)' : 'rgba(255,255,255,0.03)',
+                        borderColor: agentPolicy?.enforced ? 'var(--accent-green)' : 'rgba(255,255,255,0.1)'
+                      }}
+                    >
+                      {agentPolicy?.enforced ? '🛡️ Guardrails Enforced' : '🔓 Policies Bypassed'}
+                    </button>
+                    <div className="pulse-container" style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: agentPolicy?.enforced ? 'var(--accent-green)' : 'var(--accent-amber)', boxShadow: agentPolicy?.enforced ? '0 0 10px var(--accent-green)' : '0 0 10px var(--accent-amber)' }}></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Grid Layout: Active Policies, Proposal multi-sig, settings form */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
+                
+                {/* 1. Active Guardrail Limits and Metrics */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    🔒 Active Agent Stack Configuration
+                  </h3>
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginBottom: '1.25rem' }}>
+                    Real-time status of the Agent Stack session and active limits stored in the backend SQL database.
+                  </p>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+                    <div style={{ background: 'rgba(0,0,0,0.2)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                      <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Secured Agent EOA Wallet</div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: 'var(--accent-cyan)', marginTop: '0.25rem', fontWeight: 'bold' }}>
+                        0xff743dCDeeC361A1DEd6EdDC16e9A28F3De0965c
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem', fontSize: '0.55rem' }}>
+                        <span className="badge badge-purple">Arc Testnet (5042002)</span>
+                        <span className="badge badge-green">✓ Sanctions Screened</span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                      <div style={{ background: 'rgba(255,255,255,0.01)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                        <div style={{ fontSize: '0.58rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Daily Spend Limit</div>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#fff', marginTop: '0.15rem' }}>
+                          ${agentPolicy ? agentPolicy.spendingLimitDailyUSDC.toLocaleString() : '0.00'} USDC
+                        </div>
+                      </div>
+                      <div style={{ background: 'rgba(255,255,255,0.01)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                        <div style={{ fontSize: '0.58rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Today's Volume Spent</div>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 'bold', color: 'var(--accent-pink)', marginTop: '0.15rem' }}>
+                          ${agentPolicy ? agentPolicy.dailyVolumeSpentUSDC.toLocaleString() : '0.00'} USDC
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                      <div style={{ background: 'rgba(255,255,255,0.01)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                        <div style={{ fontSize: '0.58rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Tx Freq Cap / Hour</div>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#fff', marginTop: '0.15rem' }}>
+                          {agentPolicy ? agentPolicy.transactionFrequencyCapPerHour : '0'} Txs
+                        </div>
+                      </div>
+                      <div style={{ background: 'rgba(255,255,255,0.01)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                        <div style={{ fontSize: '0.58rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Guardrails Status</div>
+                        <div style={{ fontSize: '0.72rem', fontWeight: 'bold', color: agentPolicy?.enforced ? 'var(--accent-green)' : 'var(--accent-amber)', marginTop: '0.45rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                          {agentPolicy?.enforced ? 'Active Enforcement' : 'Bypass / Sandbox'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ background: 'rgba(255,255,255,0.01)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                      <div style={{ fontSize: '0.62rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.35rem' }}>Destination Address Allowlist</div>
+                      {agentPolicy?.addressAllowlist ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                          {agentPolicy.addressAllowlist.split(',').map((addr: string, i: number) => (
+                            <div key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: '0.6rem', color: 'var(--accent-cyan)', background: 'rgba(0, 240, 255, 0.03)', padding: '0.2rem 0.4rem', borderRadius: '4px', border: '1px solid rgba(0, 240, 255, 0.08)' }}>
+                              {addr.trim()}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                          No destination restriction (Allowlist empty).
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Propose Policy Updates */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    ⚙️ Propose Limit Adjustment
+                  </h3>
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginBottom: '1.25rem' }}>
+                    Request changes to the daily spending limit, transaction frequency caps, or address allowlist. Requires multi-sig approval.
+                  </p>
+
+                  <form onSubmit={proposePolicyUpdate} className="form-container" style={{ gap: '0.85rem' }}>
+                    <div className="form-group">
+                      <label>Daily Spending Limit (USDC)</label>
+                      <input 
+                        type="number" 
+                        value={policyLimitInput}
+                        onChange={e => setPolicyLimitInput(e.target.value)}
+                        className="form-input" 
+                        required
+                        min="1"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>Max Transactions / Hour</label>
+                      <input 
+                        type="number" 
+                        value={policyFreqInput}
+                        onChange={e => setPolicyFreqInput(e.target.value)}
+                        className="form-input" 
+                        required
+                        min="1"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>Destination Allowlist (Comma-separated Addresses)</label>
+                      <textarea 
+                        value={policyAllowlistInput}
+                        onChange={e => setPolicyAllowlistInput(e.target.value)}
+                        className="form-input" 
+                        rows={2}
+                        placeholder="e.g. 0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a, 0x49B50855Aa3bE2F677cD6303Cec089B5F319D72a"
+                        style={{ resize: 'none', fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}
+                      />
+                    </div>
+
+                    <button 
+                      type="submit" 
+                      disabled={policyLoading} 
+                      className="hex-blueprint-btn" 
+                      style={{ fontSize: '0.7rem', padding: '0.65rem', borderColor: 'var(--accent-pink)', marginTop: '0.25rem' }}
+                    >
+                      {policyLoading ? 'Proposing...' : 'Propose Guardrail Update'}
+                    </button>
+                  </form>
+                </div>
+
+                {/* 3. Multi-Sig Policy Approval Console */}
+                <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column' }}>
+                  <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    👥 Policy Multi-Sig Approvals
+                  </h3>
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginBottom: '1.25rem' }}>
+                    Review pending policy proposals. At least 2 corporate owners must approve to apply updates to the active stack.
+                  </p>
+
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyItems: 'stretch' }}>
+                    {pendingPolicyProposal ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1 }}>
+                        <div style={{ background: 'rgba(255, 46, 143, 0.02)', border: '1px dashed rgba(255, 46, 143, 0.25)', padding: '0.75rem', borderRadius: '6px' }}>
+                          <span style={{ fontSize: '0.65rem', fontWeight: 'bold', color: 'var(--accent-pink)' }}>PENDING PROPOSAL DETAILS</span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.45rem', fontSize: '0.65rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Daily Limit:</span>
+                              <strong style={{ color: '#fff' }}>${pendingPolicyProposal.spendingLimitDailyUSDC.toLocaleString()} USDC</strong>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Max Txs / Hour:</span>
+                              <strong style={{ color: '#fff' }}>{pendingPolicyProposal.transactionFrequencyCapPerHour} Txs</strong>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Allowlist:</span>
+                              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.58rem', color: 'var(--accent-cyan)', background: 'rgba(0,0,0,0.2)', padding: '0.25rem', borderRadius: '4px', marginTop: '0.15rem' }}>
+                                {pendingPolicyProposal.addressAllowlist || 'None (Open)'}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.03)', padding: '0.75rem', borderRadius: '6px' }}>
+                          <span style={{ fontSize: '0.62rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Signatures Gathered</span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.45rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.62rem' }}>
+                              <span style={{ color: '#fff' }}>✓ Proposer (Owner 1)</span>
+                              <span style={{ color: 'var(--accent-green)', fontWeight: 'bold' }}>SIGNED</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.62rem' }}>
+                              <span style={{ color: '#fff' }}>{approverName} (Owner 2)</span>
+                              <span style={{ 
+                                color: pendingPolicyProposal.signaturesCount >= 2 ? 'var(--accent-green)' : 'var(--text-muted)', 
+                                fontWeight: 'bold' 
+                              }}>
+                                {pendingPolicyProposal.signaturesCount >= 2 ? 'SIGNED' : 'PENDING'}
+                              </span>
+                            </div>
+                          </div>
+                          
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                            <span style={{ fontSize: '0.62rem', color: 'var(--text-secondary)' }}>Approval Status:</span>
+                            <strong style={{ fontSize: '0.72rem', color: pendingPolicyProposal.signaturesCount >= 2 ? 'var(--accent-green)' : 'var(--accent-pink)' }}>
+                              {pendingPolicyProposal.signaturesCount}/2 Approved
+                            </strong>
+                          </div>
+                        </div>
+
+                        {pendingPolicyProposal.signaturesCount < 2 && (
+                          <div style={{ display: 'flex', gap: '0.5rem', marginTop: 'auto' }}>
+                            <select 
+                              value={approverName} 
+                              onChange={e => setApproverName(e.target.value)} 
+                              className="form-select" 
+                              style={{ fontSize: '0.68rem', padding: '0.35rem', flex: 1 }}
+                            >
+                              <option value="Owner 2">Owner 2 (Co-Director)</option>
+                              <option value="Owner 3">Owner 3 (Treasurer)</option>
+                            </select>
+                            <button 
+                              type="button" 
+                              onClick={approvePolicyProposal}
+                              disabled={policyLoading}
+                              className="hex-blueprint-btn" 
+                              style={{ fontSize: '0.68rem', padding: '0.45rem 1rem', width: 'auto', borderColor: 'var(--accent-cyan)' }}
+                            >
+                              {policyLoading ? 'Signing...' : 'Approve & Sign'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', padding: '2rem', border: '1px dashed rgba(255,255,255,0.05)', borderRadius: '6px', background: 'rgba(255,255,255,0.01)' }}>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+                          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                          <polyline points="22 4 12 14.01 9 11.01" />
+                        </svg>
+                        <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontWeight: 'bold' }}>All policies aligned</span>
+                        <p style={{ fontSize: '0.6rem', color: 'var(--text-muted)', textAlign: 'center', marginTop: '0.25rem', maxWidth: '240px' }}>
+                          There are no pending limit adjustments or allowlist proposals currently awaiting verification.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
 
