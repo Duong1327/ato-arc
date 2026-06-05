@@ -23,6 +23,12 @@ const config: HardhatUserConfig = {
       url: ARC_TESTNET_RPC_URL,
       chainId: 5042002,
       accounts: PRIVATE_KEY !== "0x0000000000000000000000000000000000000000000000000000000000000000" ? [PRIVATE_KEY] : [],
+      // Gas Station / Paymaster Configuration for sponsored deployments
+      paymaster: {
+        enabled: true,
+        sponsorAddress: process.env.CIRCLE_PAYMASTER_SPONSOR_ADDRESS || "0x0000000000000000000000000000000000000000",
+        policyId: process.env.CIRCLE_PAYMASTER_POLICY_ID || "pol_gas_station_ato"
+      }
     },
   },
   paths: {
