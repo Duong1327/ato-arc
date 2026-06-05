@@ -21,6 +21,7 @@
   "author": "Autonomous Treasury Orchestrator Team",
   "license": "MIT",
   "dependencies": {
+    "@circle-fin/cli": "^1.1.0",
     "@circle-fin/developer-controlled-wallets": "^1.2.0",
     "@circle-fin/gateway": "file:./mocks/gateway",
     "@prisma/client": "^5.22.0",

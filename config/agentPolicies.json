@@ -1,0 +1,12 @@
+{
+  "agentId": "agent_gamma_allocator",
+  "spendingLimitDailyUSDC": 5000.0,
+  "transactionFrequencyCapPerHour": 10,
+  "addressAllowlist": [
+    "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+    "0x49B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+    "0x0c392a7A89F26253ee17a650a107e123f0966125",
+    "0xff743dCDeeC361A1DEd6EdDC16e9A28F3De0965c"
+  ],
+  "enforced": true
+}
