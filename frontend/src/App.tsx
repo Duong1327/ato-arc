@@ -305,6 +305,147 @@ export default function App() {
   const [policyLoading, setPolicyLoading] = useState<boolean>(false);
   const [approverName, setApproverName] = useState<string>('Owner 2');
 
+  // Dynamic Cross-Chain Yield Sweeper States
+  const [yieldSweeperSubTab, setYieldSweeperSubTab] = useState<'cctp' | 'yield'>('cctp');
+  const [yieldConfig, setYieldConfig] = useState<any>(null);
+  const [bridgeLogs, setBridgeLogs] = useState<any[]>([]);
+  const [pendingYieldProposal, setPendingYieldProposal] = useState<any>(null);
+  
+  // Forms inputs
+  const [yieldMinDiffInput, setYieldMinDiffInput] = useState<string>('1.5');
+  const [yieldBridgeCapInput, setYieldBridgeCapInput] = useState<string>('10000');
+  const [yieldSlippageLimitInput, setYieldSlippageLimitInput] = useState<string>('0.5');
+  const [yieldLoading, setYieldLoading] = useState<boolean>(false);
+  const [yieldApproverName, setYieldApproverName] = useState<string>('Owner 2');
+
+  const fetchYieldConfig = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/yield/rates');
+      if (res.ok) {
+        const data = await res.json();
+        setYieldConfig(data);
+        if (!pendingYieldProposal) {
+          setYieldMinDiffInput(data.minYieldDifferential.toString());
+          setYieldBridgeCapInput(data.bridgeSizeCapUSDC.toString());
+          setYieldSlippageLimitInput(data.slippageLimitPercent.toString());
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch yield config/rates:', err);
+    }
+  };
+
+  const fetchBridgeLogs = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/yield/bridge-logs');
+      if (res.ok) {
+        const data = await res.json();
+        setBridgeLogs(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch bridge logs:', err);
+    }
+  };
+
+  const fetchPendingYieldProposal = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/yield/proposal');
+      if (res.ok) {
+        const data = await res.json();
+        setPendingYieldProposal(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch pending yield proposal:', err);
+    }
+  };
+
+  const proposeYieldUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setYieldLoading(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/yield/proposal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          minYieldDifferential: parseFloat(yieldMinDiffInput),
+          bridgeSizeCapUSDC: parseFloat(yieldBridgeCapInput),
+          slippageLimitPercent: parseFloat(yieldSlippageLimitInput),
+          creator: 'Owner 1'
+        })
+      });
+      if (res.ok) {
+        addLog('SWEEPER', 'Proposed new Yield Sweeper thresholds. Requires multi-sig team approval.', 'INFO');
+        await fetchPendingYieldProposal();
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setYieldLoading(false);
+    }
+  };
+
+  const approveYieldProposal = async () => {
+    setYieldLoading(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/yield/proposal/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approver: yieldApproverName })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.applied) {
+          addLog('SWEEPER', 'Multi-sig yield thresholds update approved and successfully applied.', 'SUCCESS');
+          await fetchYieldConfig();
+          setPendingYieldProposal(null);
+        } else {
+          addLog('SWEEPER', `Approved by ${yieldApproverName}. Current approval count: 2/2.`, 'INFO');
+          await fetchPendingYieldProposal();
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setYieldLoading(false);
+    }
+  };
+
+  const toggleYieldSweeper = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/yield/toggle', {
+        method: 'POST'
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setYieldConfig(data);
+        addLog('SWEEPER', `Yield Sweeper automation toggled. Active: ${data.isSweepEnabled}`, 'INFO');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const triggerSimulateTick = async () => {
+    try {
+      addLog('SWEEPER', 'Executing off-chain Auditor checking cycle...', 'INFO');
+      const res = await fetch('http://localhost:3001/api/yield/simulate-tick', {
+        method: 'POST'
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.swept) {
+          addLog('SWEEPER', `Sweep triggered! Bridged ${data.bridgeLog.amountUSDC} USDC to Arc. Yield Diff: ${data.bridgeLog.yieldDiff}%`, 'SUCCESS');
+          fetchBridgeLogs();
+          fetchYieldConfig();
+        } else {
+          addLog('SWEEPER', `Auditor check completed: ${data.reason}`, 'WARNING');
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const fetchPaymasterStatus = async () => {
     try {
       const res = await fetch('http://localhost:3001/api/paymaster/status');
@@ -887,7 +1028,21 @@ export default function App() {
     fetchPaymasterStatus();
     fetchAgentPolicy();
     fetchPendingPolicyProposal();
+    fetchYieldConfig();
+    fetchBridgeLogs();
+    fetchPendingYieldProposal();
   }, [vaultAddress]);
+
+  // Poll yield data periodically when sweeper tab is active to simulate real-time yield rate fluctuations
+  useEffect(() => {
+    if (activeTab !== 'sweeper') return;
+    const interval = setInterval(() => {
+      fetchYieldConfig();
+      fetchBridgeLogs();
+      fetchPendingYieldProposal();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [activeTab]);
 
   // Load multisig proposals dynamically from the blockchain if a vault is loaded!
   useEffect(() => {
@@ -3477,270 +3632,608 @@ export default function App() {
 
           {/* TAB 3: CIRCLE CCTP SWEEPER */}
           {activeTab === 'sweeper' && (
-            <div className="milestones-tab-grid">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', width: '100%' }}>
               
-              {/* Sweeper Settings */}
-              <div className="glass-panel" style={{ padding: '1.5rem', gap: '1.25rem' }}>
-                <div className="card-title-block">
-                  <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>Bring Funds from Other Networks</h3>
-                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
-                    Move your USDC from other networks into your company account. We handle the transfer securely through Circle.
-                  </p>
-                </div>
-
-                <form onSubmit={handleCctpSweep} className="form-container">
-                  <div className="form-group">
-                    <label>Where are your funds?</label>
-                    <select
-                      value={cctpSourceChainId}
-                      onChange={e => setCctpSourceChainId(parseInt(e.target.value) as 84532 | 421614)}
-                      className="form-select"
-                    >
-                      <option value={84532}>Base (Testnet)</option>
-                      <option value={421614}>Arbitrum (Testnet)</option>
-                    </select>
-                  </div>
-
-                  <div className="form-group">
-                    <label>Available Balance on Source Network</label>
-                    <div style={{ padding: '0.5rem 0.75rem', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ color: 'var(--text-secondary)' }}>Your balance there:</span>
-                      <strong style={{ color: '#fff', fontFamily: 'var(--font-mono)' }}>
-                        {isConnected && sourceChainUsdcBalanceData 
-                          ? (Number(sourceChainUsdcBalanceData) / 1e6).toLocaleString(undefined, { minimumFractionDigits: 2 })
-                          : '0.00'}{' '}
-                        USDC
-                      </strong>
-                    </div>
-                  </div>
-
-                  <div className="form-row">
-                    <div className="form-group">
-                      <label>How much to move? (USDC)</label>
-                      <input 
-                        type="number" 
-                        value={cctpAmount}
-                        onChange={e => setCctpAmount(e.target.value)}
-                        className="form-input" 
-                        required
-                        step="0.01"
-                      />
-                    </div>
-
-                    <div className="form-group">
-                      <label>Destination (auto-filled)</label>
-                      <input 
-                        type="text" 
-                        readOnly
-                        value={vaultAddress ? vaultAddress.replace('0x', '0x000000000000000000000000') : 'Connect your account first'}
-                        className="form-input" 
-                        style={{ fontFamily: 'var(--font-mono)', fontSize: '0.6rem', backgroundColor: 'rgba(255,255,255,0.02)', color: 'var(--text-muted)' }}
-                      />
-                    </div>
-                  </div>
-
-                  {isConnected && chainId !== cctpSourceChainId ? (
-                    <button 
-                      type="button" 
-                      onClick={() => switchChain({ chainId: cctpSourceChainId })} 
-                      className="hex-blueprint-btn animate-pulse" 
-                      style={{ marginTop: '0.5rem', borderColor: 'var(--accent-pink)' }}
-                    >
-                      Switch to {CCTP_CONFIG[cctpSourceChainId].name} Network
-                    </button>
-                  ) : (
-                    <button 
-                      type="submit" 
-                      disabled={cctpStep > 0 || !vaultAddress} 
-                      className="hex-blueprint-btn" 
-                      style={{ marginTop: '0.5rem' }}
-                    >
-                      {cctpStep === 1 ? 'Preparing transfer...' :
-                       cctpStep === 2 ? 'Moving your USDC...' :
-                       !vaultAddress ? 'Connect your account first' : 'Move Funds Now'}
-                    </button>
-                  )}
-                </form>
+              {/* Yield Sweeper Sub-navigation tabs */}
+              <div className="sub-tab-container" style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '0.5rem' }}>
+                <button
+                  type="button"
+                  onClick={() => setYieldSweeperSubTab('cctp')}
+                  className={`sub-tab-button ${yieldSweeperSubTab === 'cctp' ? 'sub-tab-button-active' : ''}`}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: yieldSweeperSubTab === 'cctp' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                    fontWeight: 'bold',
+                    fontSize: '0.75rem',
+                    cursor: 'pointer',
+                    padding: '0.5rem 1rem',
+                    borderBottom: yieldSweeperSubTab === 'cctp' ? '2px solid var(--accent-cyan)' : 'none',
+                    transition: 'all 0.2s ease',
+                    outline: 'none'
+                  }}
+                >
+                  📥 Manual CCTP Transfer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setYieldSweeperSubTab('yield')}
+                  className={`sub-tab-button ${yieldSweeperSubTab === 'yield' ? 'sub-tab-button-active' : ''}`}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: yieldSweeperSubTab === 'yield' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                    fontWeight: 'bold',
+                    fontSize: '0.75rem',
+                    cursor: 'pointer',
+                    padding: '0.5rem 1rem',
+                    borderBottom: yieldSweeperSubTab === 'yield' ? '2px solid var(--accent-cyan)' : 'none',
+                    transition: 'all 0.2s ease',
+                    outline: 'none'
+                  }}
+                >
+                  ⚡ Dynamic Yield Sweeper (Auto)
+                </button>
               </div>
 
-              {/* Sweeper Visualizer */}
-              <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Transfer Progress</h3>
-                
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', backgroundColor: 'rgba(255,255,255,0.02)', padding: '1rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <div style={{ 
-                      width: '8px', 
-                      height: '8px', 
-                      borderRadius: '50%', 
-                      backgroundColor: cctpStep >= 1 ? 'var(--accent-green)' : 'rgba(255,255,255,0.1)' 
-                    }}></div>
-                    <span style={{ fontSize: '0.7rem', color: cctpStep >= 1 ? '#fff' : 'var(--text-muted)' }}>
-                      Step 1: Authorize the transfer from your source account
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <div style={{ 
-                      width: '8px', 
-                      height: '8px', 
-                      borderRadius: '50%', 
-                      backgroundColor: cctpStep >= 2 ? 'var(--accent-green)' : 'rgba(255,255,255,0.1)' 
-                    }}></div>
-                    <span style={{ fontSize: '0.7rem', color: cctpStep >= 2 ? '#fff' : 'var(--text-muted)' }}>
-                      Step 2: Securely move funds through Circle's network
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <div style={{ 
-                      width: '8px', 
-                      height: '8px', 
-                      borderRadius: '50%', 
-                      backgroundColor: cctpStep >= 3 ? 'var(--accent-green)' : 'rgba(255,255,255,0.1)' 
-                    }}></div>
-                    <span style={{ fontSize: '0.7rem', color: cctpStep >= 3 ? '#fff' : 'var(--text-muted)' }}>
-                      Step 3: Funds arrive in your company account
-                    </span>
-                  </div>
-                </div>
-
-                {cctpTxHash && (
-                  <div style={{ fontSize: '0.65rem', wordBreak: 'break-all', color: 'var(--accent-cyan)' }}>
-                    <strong>Transfer ID:</strong> {cctpTxHash} <br />
-                    <a href={`https://cctp.circle.com/tx/${cctpTxHash}`} target="_blank" rel="noreferrer" style={{ textDecoration: 'underline', color: 'var(--accent-pink)', marginTop: '0.25rem', display: 'inline-block' }}>
-                      Track your transfer ↗
-                    </a>
-                  </div>
-                )}
-              </div>
-
-              {/* StableFX Swap Card */}
-              <div className="glass-panel" style={{ padding: '1.5rem', gap: '1.25rem' }}>
-                <div className="card-title-block">
-                  <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>StableFX Treasury Swap</h3>
-                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
-                    Execute instant on-chain foreign exchange sweeps between USDC and EURC stablecoins.
-                  </p>
-                </div>
-
-                <form onSubmit={handleExecuteSwap} className="form-container">
-                  <div className="form-row" style={{ display: 'flex', gap: '1rem' }}>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label>Sell Token</label>
-                      <select
-                        value={swapSellToken}
-                        onChange={e => {
-                          const val = e.target.value as 'USDC' | 'EURC';
-                          setSwapSellToken(val);
-                          setSwapBuyToken(val === 'USDC' ? 'EURC' : 'USDC');
-                        }}
-                        className="form-select"
-                      >
-                        <option value="USDC">USDC (USD Coin)</option>
-                        <option value="EURC">EURC (Euro Coin)</option>
-                      </select>
+              {yieldSweeperSubTab === 'cctp' ? (
+                <div className="milestones-tab-grid">
+                  
+                  {/* Sweeper Settings */}
+                  <div className="glass-panel" style={{ padding: '1.5rem', gap: '1.25rem' }}>
+                    <div className="card-title-block">
+                      <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>Bring Funds from Other Networks</h3>
+                      <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                        Move your USDC from other networks into your company account. We handle the transfer securely through Circle.
+                      </p>
                     </div>
 
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label>Buy Token</label>
-                      <select
-                        value={swapBuyToken}
-                        onChange={e => {
-                          const val = e.target.value as 'USDC' | 'EURC';
-                          setSwapBuyToken(val);
-                          setSwapSellToken(val === 'USDC' ? 'EURC' : 'USDC');
-                        }}
-                        className="form-select"
-                      >
-                        <option value="EURC">EURC (Euro Coin)</option>
-                        <option value="USDC">USDC (USD Coin)</option>
-                      </select>
-                    </div>
+                    <form onSubmit={handleCctpSweep} className="form-container">
+                      <div className="form-group">
+                        <label>Where are your funds?</label>
+                        <select
+                          value={cctpSourceChainId}
+                          onChange={e => setCctpSourceChainId(parseInt(e.target.value) as 84532 | 421614)}
+                          className="form-select"
+                        >
+                          <option value={84532}>Base (Testnet)</option>
+                          <option value={421614}>Arbitrum (Testnet)</option>
+                        </select>
+                      </div>
+
+                      <div className="form-group">
+                        <label>Available Balance on Source Network</label>
+                        <div style={{ padding: '0.5rem 0.75rem', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ color: 'var(--text-secondary)' }}>Your balance there:</span>
+                          <strong style={{ color: '#fff', fontFamily: 'var(--font-mono)' }}>
+                            {isConnected && sourceChainUsdcBalanceData 
+                              ? (Number(sourceChainUsdcBalanceData) / 1e6).toLocaleString(undefined, { minimumFractionDigits: 2 })
+                              : '0.00'}{' '}
+                            USDC
+                          </strong>
+                        </div>
+                      </div>
+
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>How much to move? (USDC)</label>
+                          <input 
+                            type="number" 
+                            value={cctpAmount}
+                            onChange={e => setCctpAmount(e.target.value)}
+                            className="form-input" 
+                            required
+                            step="0.01"
+                          />
+                        </div>
+
+                        <div className="form-group">
+                          <label>Destination (auto-filled)</label>
+                          <input 
+                            type="text" 
+                            readOnly
+                            value={vaultAddress ? vaultAddress.replace('0x', '0x000000000000000000000000') : 'Connect your account first'}
+                            className="form-input" 
+                            style={{ fontFamily: 'var(--font-mono)', fontSize: '0.6rem', backgroundColor: 'rgba(255,255,255,0.02)', color: 'var(--text-muted)' }}
+                          />
+                        </div>
+                      </div>
+
+                      {isConnected && chainId !== cctpSourceChainId ? (
+                        <button 
+                          type="button" 
+                          onClick={() => switchChain({ chainId: cctpSourceChainId })} 
+                          className="hex-blueprint-btn animate-pulse" 
+                          style={{ marginTop: '0.5rem', borderColor: 'var(--accent-pink)' }}
+                        >
+                          Switch to {CCTP_CONFIG[cctpSourceChainId].name} Network
+                        </button>
+                      ) : (
+                        <button 
+                          type="submit" 
+                          disabled={cctpStep > 0 || !vaultAddress} 
+                          className="hex-blueprint-btn" 
+                          style={{ marginTop: '0.5rem' }}
+                        >
+                          {cctpStep === 1 ? 'Preparing transfer...' :
+                           cctpStep === 2 ? 'Moving your USDC...' :
+                           !vaultAddress ? 'Connect your account first' : 'Move Funds Now'}
+                        </button>
+                      )}
+                    </form>
                   </div>
 
-                  <div className="form-row" style={{ display: 'flex', gap: '1rem' }}>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label>Sell Amount</label>
-                      <input
-                        type="number"
-                        value={swapAmount}
-                        onChange={e => setSwapAmount(e.target.value)}
-                        className="form-input"
-                        required
-                        step="0.01"
-                      />
-                    </div>
+                  {/* Sweeper Visualizer */}
+                  <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>Transfer Progress</h3>
+                    
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', backgroundColor: 'rgba(255,255,255,0.02)', padding: '1rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <div style={{ 
+                          width: '8px', 
+                          height: '8px', 
+                          borderRadius: '50%', 
+                          backgroundColor: cctpStep >= 1 ? 'var(--accent-green)' : 'rgba(255,255,255,0.1)' 
+                        }}></div>
+                        <span style={{ fontSize: '0.7rem', color: cctpStep >= 1 ? '#fff' : 'var(--text-muted)' }}>
+                          Step 1: Authorize the transfer from your source account
+                        </span>
+                      </div>
 
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label>Estimated Exchange Rate</label>
-                      <div style={{ padding: '0.5rem 0.75rem', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', fontSize: '0.75rem', color: '#fff', fontFamily: 'var(--font-mono)' }}>
-                        {swapQuote ? `1 ${swapSellToken} = ${swapQuote.rate} ${swapBuyToken}` : 'Loading rate...'}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <div style={{ 
+                          width: '8px', 
+                          height: '8px', 
+                          borderRadius: '50%', 
+                          backgroundColor: cctpStep >= 2 ? 'var(--accent-green)' : 'rgba(255,255,255,0.1)' 
+                        }}></div>
+                        <span style={{ fontSize: '0.7rem', color: cctpStep >= 2 ? '#fff' : 'var(--text-muted)' }}>
+                          Step 2: Securely move funds through Circle's network
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <div style={{ 
+                          width: '8px', 
+                          height: '8px', 
+                          borderRadius: '50%', 
+                          backgroundColor: cctpStep >= 3 ? 'var(--accent-green)' : 'rgba(255,255,255,0.1)' 
+                        }}></div>
+                        <span style={{ fontSize: '0.7rem', color: cctpStep >= 3 ? '#fff' : 'var(--text-muted)' }}>
+                          Step 3: Funds arrive in your company account
+                        </span>
                       </div>
                     </div>
+
+                    {cctpTxHash && (
+                      <div style={{ fontSize: '0.65rem', wordBreak: 'break-all', color: 'var(--accent-cyan)' }}>
+                        <strong>Transfer ID:</strong> {cctpTxHash} <br />
+                        <a href={`https://cctp.circle.com/tx/${cctpTxHash}`} target="_blank" rel="noreferrer" style={{ textDecoration: 'underline', color: 'var(--accent-pink)', marginTop: '0.25rem', display: 'inline-block' }}>
+                          Track your transfer ↗
+                        </a>
+                      </div>
+                    )}
                   </div>
 
-                  <div style={{ backgroundColor: 'rgba(0, 240, 255, 0.02)', padding: '0.75rem', borderRadius: '4px', border: '1px solid rgba(0, 240, 255, 0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.75rem' }}>
-                    <span style={{ color: 'var(--text-secondary)' }}>You will receive at least:</span>
-                    <strong style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>
-                      {swapQuote ? `${swapQuote.buyAmount} ${swapBuyToken}` : '0.00'}
-                    </strong>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={swapInProgress || !vaultAddress}
-                    className="hex-blueprint-btn"
-                    style={{ marginTop: '0.5rem', borderColor: 'var(--accent-cyan)' }}
-                  >
-                    {swapInProgress ? 'Executing Swap...' : !vaultAddress ? 'Connect your account first' : `Swap ${swapSellToken} to ${swapBuyToken}`}
-                  </button>
-                </form>
-
-                {swapTxHash && (
-                  <div style={{ fontSize: '0.65rem', wordBreak: 'break-all', color: 'var(--accent-cyan)' }}>
-                    <strong>Swap Transaction Hash:</strong> {swapTxHash} <br />
-                    <a href={`https://testnet.arcscan.app/tx/${swapTxHash}`} target="_blank" rel="noreferrer" style={{ textDecoration: 'underline', color: 'var(--accent-pink)', marginTop: '0.25rem', display: 'inline-block' }}>
-                      Verify on ArcScan ↗
-                    </a>
-                  </div>
-                )}
-              </div>
-
-              {/* StableFX History Visualizer */}
-              <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>FX Sweeping & Swaps History</h3>
-                
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', overflowY: 'auto', maxHeight: '180px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', backgroundColor: 'rgba(0, 240, 255, 0.03)', borderRadius: '4px', border: '1px solid rgba(0, 240, 255, 0.1)', fontSize: '0.68rem' }}>
-                    <div>
-                      <span className="badge badge-purple" style={{ marginRight: '0.5rem' }}>EURC → USDC</span>
-                      <span style={{ color: '#fff' }}>Swept 50,000.00 EURC</span>
+                  {/* StableFX Swap Card */}
+                  <div className="glass-panel" style={{ padding: '1.5rem', gap: '1.25rem' }}>
+                    <div className="card-title-block">
+                      <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>StableFX Treasury Swap</h3>
+                      <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                        Execute instant on-chain foreign exchange sweeps between USDC and EURC stablecoins.
+                      </p>
                     </div>
-                    <span style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>+54,000.00 USDC</span>
+
+                    <form onSubmit={handleExecuteSwap} className="form-container">
+                      <div className="form-row" style={{ display: 'flex', gap: '1rem' }}>
+                        <div className="form-group" style={{ flex: 1 }}>
+                          <label>Sell Token</label>
+                          <select
+                            value={swapSellToken}
+                            onChange={e => {
+                              const val = e.target.value as 'USDC' | 'EURC';
+                              setSwapSellToken(val);
+                              setSwapBuyToken(val === 'USDC' ? 'EURC' : 'USDC');
+                            }}
+                            className="form-select"
+                          >
+                            <option value="USDC">USDC (USD Coin)</option>
+                            <option value="EURC">EURC (Euro Coin)</option>
+                          </select>
+                        </div>
+
+                        <div className="form-group" style={{ flex: 1 }}>
+                          <label>Buy Token</label>
+                          <select
+                            value={swapBuyToken}
+                            onChange={e => {
+                              const val = e.target.value as 'USDC' | 'EURC';
+                              setSwapBuyToken(val);
+                              setSwapSellToken(val === 'USDC' ? 'EURC' : 'USDC');
+                            }}
+                            className="form-select"
+                          >
+                            <option value="EURC">EURC (Euro Coin)</option>
+                            <option value="USDC">USDC (USD Coin)</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="form-row" style={{ display: 'flex', gap: '1rem' }}>
+                        <div className="form-group" style={{ flex: 1 }}>
+                          <label>Sell Amount</label>
+                          <input
+                            type="number"
+                            value={swapAmount}
+                            onChange={e => setSwapAmount(e.target.value)}
+                            className="form-input"
+                            required
+                            step="0.01"
+                          />
+                        </div>
+
+                        <div className="form-group" style={{ flex: 1 }}>
+                          <label>Estimated Exchange Rate</label>
+                          <div style={{ padding: '0.5rem 0.75rem', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', fontSize: '0.75rem', color: '#fff', fontFamily: 'var(--font-mono)' }}>
+                            {swapQuote ? `1 ${swapSellToken} = ${swapQuote.rate} ${swapBuyToken}` : 'Loading rate...'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ backgroundColor: 'rgba(0, 240, 255, 0.02)', padding: '0.75rem', borderRadius: '4px', border: '1px solid rgba(0, 240, 255, 0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.75rem' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>You will receive at least:</span>
+                        <strong style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>
+                          {swapQuote ? `${swapQuote.buyAmount} ${swapBuyToken}` : '0.00'}
+                        </strong>
+                      </div>
+
+                      <button
+                        type="submit"
+                        disabled={swapInProgress || !vaultAddress}
+                        className="hex-blueprint-btn"
+                        style={{ marginTop: '0.5rem', borderColor: 'var(--accent-cyan)' }}
+                      >
+                        {swapInProgress ? 'Executing Swap...' : !vaultAddress ? 'Connect your account first' : `Swap ${swapSellToken} to ${swapBuyToken}`}
+                      </button>
+                    </form>
+
+                    {swapTxHash && (
+                      <div style={{ fontSize: '0.65rem', wordBreak: 'break-all', color: 'var(--accent-cyan)' }}>
+                        <strong>Swap Transaction Hash:</strong> {swapTxHash} <br />
+                        <a href={`https://testnet.arcscan.app/tx/${swapTxHash}`} target="_blank" rel="noreferrer" style={{ textDecoration: 'underline', color: 'var(--accent-pink)', marginTop: '0.25rem', display: 'inline-block' }}>
+                          Verify on ArcScan ↗
+                        </a>
+                      </div>
+                    )}
                   </div>
 
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', backgroundColor: 'rgba(255, 255, 255, 0.02)', borderRadius: '4px', border: '1px solid rgba(255, 255, 255, 0.05)', fontSize: '0.68rem' }}>
-                    <div>
-                      <span className="badge badge-pink" style={{ marginRight: '0.5rem' }}>USDC → EURC</span>
-                      <span style={{ color: '#fff' }}>Swapped 10,000.00 USDC</span>
+                  {/* StableFX History Visualizer */}
+                  <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase' }}>FX Sweeping & Swaps History</h3>
+                    
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', overflowY: 'auto', maxHeight: '180px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', backgroundColor: 'rgba(0, 240, 255, 0.03)', borderRadius: '4px', border: '1px solid rgba(0, 240, 255, 0.1)', fontSize: '0.68rem' }}>
+                        <div>
+                          <span className="badge badge-purple" style={{ marginRight: '0.5rem' }}>EURC → USDC</span>
+                          <span style={{ color: '#fff' }}>Swept 50,000.00 EURC</span>
+                        </div>
+                        <span style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>+54,000.00 USDC</span>
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', backgroundColor: 'rgba(255, 255, 255, 0.02)', borderRadius: '4px', border: '1px solid rgba(255, 255, 255, 0.05)', fontSize: '0.68rem' }}>
+                        <div>
+                          <span className="badge badge-pink" style={{ marginRight: '0.5rem' }}>USDC → EURC</span>
+                          <span style={{ color: '#fff' }}>Swapped 10,000.00 USDC</span>
+                        </div>
+                        <span style={{ color: 'var(--accent-pink)', fontFamily: 'var(--font-mono)' }}>+9,250.00 EURC</span>
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', backgroundColor: 'rgba(255, 255, 255, 0.02)', borderRadius: '4px', border: '1px solid rgba(255, 255, 255, 0.05)', fontSize: '0.68rem' }}>
+                        <div>
+                          <span className="badge badge-purple" style={{ marginRight: '0.5rem' }}>EURC → USDC</span>
+                          <span style={{ color: '#fff' }}>Swept 1,200.00 EURC</span>
+                        </div>
+                        <span style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>+1,296.00 USDC</span>
+                      </div>
                     </div>
-                    <span style={{ color: 'var(--accent-pink)', fontFamily: 'var(--font-mono)' }}>+9,250.00 EURC</span>
+
+                    <div style={{ fontSize: '0.58rem', color: 'var(--text-muted)', textAlign: 'center' }}>
+                      StableFX sweeps are audited by the Auditor Agent and processed automatically.
+                    </div>
                   </div>
 
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem', backgroundColor: 'rgba(255, 255, 255, 0.02)', borderRadius: '4px', border: '1px solid rgba(255, 255, 255, 0.05)', fontSize: '0.68rem' }}>
-                    <div>
-                      <span className="badge badge-purple" style={{ marginRight: '0.5rem' }}>EURC → USDC</span>
-                      <span style={{ color: '#fff' }}>Swept 1,200.00 EURC</span>
-                    </div>
-                    <span style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>+1,296.00 USDC</span>
-                  </div>
                 </div>
+              ) : (
+                <div className="milestones-tab-grid" style={{ display: 'grid', gridTemplateColumns: '2fr 1.25fr', gap: '1.5rem', width: '100%' }}>
+                  
+                  {/* Left Column: Yield Monitor & Policies */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                    
+                    {/* Live Yield Rates Monitor */}
+                    <div className="glass-panel" style={{ padding: '1.5rem', background: 'linear-gradient(135deg, rgba(0, 240, 255, 0.03) 0%, rgba(255, 255, 255, 0.01) 100%)', border: '1px solid rgba(0, 240, 255, 0.15)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                        <h3 className="metric-label" style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--accent-cyan)', margin: 0 }}>
+                          📊 Real-time Yield Rates Monitor
+                        </h3>
+                        <span className="badge badge-green" style={{ fontSize: '0.58rem' }}>LIVE FEED</span>
+                      </div>
+                      <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', margin: 0 }}>
+                        We monitor idle corporate treasury funds on other EVM chains. Funds are routed to Arc automatically via CCTP to capitalize on yield opportunities.
+                      </p>
 
-                <div style={{ fontSize: '0.58rem', color: 'var(--text-muted)', textAlign: 'center' }}>
-                  StableFX sweeps are audited by the Auditor Agent and processed automatically.
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginTop: '1.25rem' }}>
+                        {/* Base Network Rates */}
+                        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.04)' }}>
+                          <span style={{ fontSize: '0.58rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 'bold' }}>Base Network</span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.5rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Aave V3:</span>
+                              <strong style={{ color: '#fff' }}>{yieldConfig?.baseAave || '3.20'}%</strong>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Compound:</span>
+                              <strong style={{ color: '#fff' }}>{yieldConfig?.baseComp || '2.80'}%</strong>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Arbitrum Network Rates */}
+                        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.04)' }}>
+                          <span style={{ fontSize: '0.58rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 'bold' }}>Arbitrum</span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.5rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Aave V3:</span>
+                              <strong style={{ color: '#fff' }}>{yieldConfig?.arbAave || '3.50'}%</strong>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Compound:</span>
+                              <strong style={{ color: '#fff' }}>{yieldConfig?.arbComp || '3.00'}%</strong>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Destination Yield (Arc) */}
+                        <div style={{ background: 'linear-gradient(135deg, rgba(0,255,20,0.05) 0%, rgba(0,240,255,0.02) 100%)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(0,255,20,0.15)' }}>
+                          <span style={{ fontSize: '0.58rem', color: 'var(--accent-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>Destination (Arc)</span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.5rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>Native Yield:</span>
+                              <strong style={{ color: 'var(--accent-green)', fontSize: '0.78rem' }}>
+                                {yieldConfig?.arcYield || '5.50'}%
+                              </strong>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {yieldConfig && (
+                        <div style={{ marginTop: '1rem', padding: '0.75rem', backgroundColor: 'rgba(255,255,255,0.02)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                            <span style={{ fontSize: '0.58rem', color: 'var(--text-muted)' }}>MAX YIELD DIFFERENTIAL</span>
+                            <div style={{ fontSize: '0.75rem', color: '#fff', fontWeight: 'bold', marginTop: '0.15rem' }}>
+                              Arc Yield ({yieldConfig.arcYield}%) vs Lowest ({Math.min(yieldConfig.baseAave, yieldConfig.baseComp, yieldConfig.arbAave, yieldConfig.arbComp).toFixed(2)}%)
+                            </div>
+                          </div>
+                          <div style={{ textAlign: 'right' }}>
+                            <span style={{ fontSize: '0.58rem', color: 'var(--text-muted)' }}>CURRENT DELTA</span>
+                            <div style={{ fontSize: '1rem', color: 'var(--accent-cyan)', fontWeight: 'bold', fontFamily: 'var(--font-mono)' }}>
+                              +{(yieldConfig.arcYield - Math.min(yieldConfig.baseAave, yieldConfig.baseComp, yieldConfig.arbAave, yieldConfig.arbComp)).toFixed(2)}%
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div style={{ display: 'flex', gap: '1rem', marginTop: '1.25rem' }}>
+                        <button
+                          type="button"
+                          onClick={triggerSimulateTick}
+                          className="hex-blueprint-btn"
+                          style={{ flex: 1, padding: '0.5rem 1rem', fontSize: '0.7rem', width: 'auto' }}
+                        >
+                          🔍 Trigger Off-Chain Auditor Check
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Yield Settings Status */}
+                    <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                        <h3 className="metric-label" style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: '#fff', margin: 0 }}>
+                          ⚙️ Sweeper Rules & Guardrails
+                        </h3>
+                        <span className={`badge ${yieldConfig?.isSweepEnabled ? 'badge-green' : 'badge-red'}`} style={{ fontSize: '0.58rem' }}>
+                          {yieldConfig?.isSweepEnabled ? 'AUTOMATION ACTIVE' : 'AUTOMATION PAUSED'}
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', backgroundColor: 'rgba(255,255,255,0.01)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)', fontFamily: 'var(--font-mono)', fontSize: '0.62rem' }}>
+                        <div>
+                          <span style={{ color: 'var(--text-muted)' }}>Min Yield Delta:</span>
+                          <div style={{ color: '#fff', fontSize: '0.75rem', fontWeight: 'bold', marginTop: '0.15rem' }}>
+                            {yieldConfig?.minYieldDifferential || '1.50'}%
+                          </div>
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-muted)' }}>Bridge Size Cap:</span>
+                          <div style={{ color: '#fff', fontSize: '0.75rem', fontWeight: 'bold', marginTop: '0.15rem' }}>
+                            {(yieldConfig?.bridgeSizeCapUSDC || 10000).toLocaleString()} USDC
+                          </div>
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-muted)' }}>Slippage Limit:</span>
+                          <div style={{ color: '#fff', fontSize: '0.75rem', fontWeight: 'bold', marginTop: '0.15rem' }}>
+                            {yieldConfig?.slippageLimitPercent || '0.50'}%
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={toggleYieldSweeper}
+                        className="hex-blueprint-btn"
+                        style={{
+                          marginTop: '1rem',
+                          borderColor: yieldConfig?.isSweepEnabled ? 'var(--accent-pink)' : 'var(--accent-green)',
+                          color: yieldConfig?.isSweepEnabled ? 'var(--accent-pink)' : 'var(--accent-green)',
+                          background: 'transparent',
+                          width: '100%',
+                          fontSize: '0.68rem',
+                          padding: '0.5rem'
+                        }}
+                      >
+                        {yieldConfig?.isSweepEnabled ? '⚠️ Pause Automated Sweeping' : '⚡ Resume Automated Sweeping'}
+                      </button>
+                    </div>
+
+                  </div>
+
+                  {/* Right Column: Multi-sig Proposals & Logs */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                    
+                    {/* Parameter Updates form */}
+                    <div className="glass-panel" style={{ padding: '1.25rem' }}>
+                      <h3 className="metric-label" style={{ fontSize: '0.72rem', textTransform: 'uppercase', color: '#fff', marginBottom: '0.75rem' }}>
+                        Propose Threshold Update
+                      </h3>
+
+                      {!pendingYieldProposal ? (
+                        <form onSubmit={proposeYieldUpdate} className="form-container">
+                          <div className="form-group">
+                            <label style={{ fontSize: '0.6rem' }}>Min Yield Differential (%)</label>
+                            <input
+                              type="number"
+                              step="0.1"
+                              value={yieldMinDiffInput}
+                              onChange={e => setYieldMinDiffInput(e.target.value)}
+                              className="form-input"
+                              style={{ padding: '0.35rem', fontSize: '0.7rem' }}
+                              required
+                            />
+                          </div>
+
+                          <div className="form-group">
+                            <label style={{ fontSize: '0.6rem' }}>Bridge Size Cap (USDC)</label>
+                            <input
+                              type="number"
+                              step="100"
+                              value={yieldBridgeCapInput}
+                              onChange={e => setYieldBridgeCapInput(e.target.value)}
+                              className="form-input"
+                              style={{ padding: '0.35rem', fontSize: '0.7rem' }}
+                              required
+                            />
+                          </div>
+
+                          <div className="form-group">
+                            <label style={{ fontSize: '0.6rem' }}>Slippage Limit (%)</label>
+                            <input
+                              type="number"
+                              step="0.05"
+                              value={yieldSlippageLimitInput}
+                              onChange={e => setYieldSlippageLimitInput(e.target.value)}
+                              className="form-input"
+                              style={{ padding: '0.35rem', fontSize: '0.7rem' }}
+                              required
+                            />
+                          </div>
+
+                          <button
+                            type="submit"
+                            disabled={yieldLoading}
+                            className="hex-blueprint-btn"
+                            style={{ fontSize: '0.68rem', padding: '0.5rem', marginTop: '0.5rem' }}
+                          >
+                            {yieldLoading ? 'Submitting...' : 'Submit Parameter Change'}
+                          </button>
+                        </form>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                          <div style={{ backgroundColor: 'rgba(255, 46, 143, 0.05)', border: '1px solid rgba(255, 46, 143, 0.2)', padding: '0.75rem', borderRadius: '6px', fontSize: '0.65rem' }}>
+                            <div style={{ fontWeight: 'bold', color: 'var(--accent-pink)', marginBottom: '0.35rem' }}>Pending Parameter Update:</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontFamily: 'var(--font-mono)' }}>
+                              <div>• Min Yield Diff: {pendingYieldProposal.minYieldDifferential}%</div>
+                              <div>• Bridge Cap: {pendingYieldProposal.bridgeSizeCapUSDC.toLocaleString()} USDC</div>
+                              <div>• Slippage Limit: {pendingYieldProposal.slippageLimitPercent}%</div>
+                            </div>
+                            <div style={{ marginTop: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.58rem' }}>
+                              Proposed by Owner 1. Approvals: {pendingYieldProposal.approvals.join(', ')} (1/2 sign-offs)
+                            </div>
+                          </div>
+
+                          <div className="form-group">
+                            <label style={{ fontSize: '0.6rem' }}>Signing Owner Account</label>
+                            <select
+                              value={yieldApproverName}
+                              onChange={e => setYieldApproverName(e.target.value)}
+                              className="form-select"
+                              style={{ padding: '0.35rem', fontSize: '0.7rem' }}
+                            >
+                              <option value="Owner 2">Owner 2 (Director)</option>
+                              <option value="Owner 3">Owner 3 (CFO)</option>
+                            </select>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={approveYieldProposal}
+                            disabled={yieldLoading}
+                            className="hex-blueprint-btn"
+                            style={{ fontSize: '0.68rem', padding: '0.5rem', width: '100%', borderColor: 'var(--accent-green)', color: 'var(--accent-green)', background: 'transparent' }}
+                          >
+                            {yieldLoading ? 'Approving...' : '✓ Approve & Apply Changes'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Bridge History Logs */}
+                    <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                      <h3 className="metric-label" style={{ fontSize: '0.72rem', textTransform: 'uppercase', color: '#fff', margin: 0 }}>
+                        📡 Automated Bridge Logs
+                      </h3>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', overflowY: 'auto', maxHeight: '250px' }}>
+                        {bridgeLogs.length === 0 ? (
+                          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', textAlign: 'center', padding: '1.5rem 0' }}>
+                            No automated bridge transactions recorded yet.
+                          </div>
+                        ) : (
+                          bridgeLogs.map((log: any) => (
+                            <div key={log.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', padding: '0.6rem', backgroundColor: 'rgba(255,255,255,0.02)', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.04)', fontSize: '0.65rem' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div>
+                                  <span className={`badge ${log.status === 'COMPLETED' ? 'badge-green' : log.status === 'PENDING' ? 'badge-orange' : 'badge-red'}`} style={{ fontSize: '0.52rem', padding: '0.1rem 0.35rem', marginRight: '0.4rem' }}>
+                                    {log.status}
+                                  </span>
+                                  <strong style={{ color: '#fff' }}>{log.amountUSDC.toLocaleString()} USDC</strong>
+                                </div>
+                                <span style={{ color: 'var(--text-muted)', fontSize: '0.58rem' }}>
+                                  {new Date(log.createdAt).toLocaleTimeString()}
+                                </span>
+                              </div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: '0.6rem', marginTop: '0.15rem' }}>
+                                <span>{log.sourceChain} → {log.destChain} (Yield Diff: {log.yieldDiff}%)</span>
+                                {log.txHash && (
+                                  <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                                    {log.txHash.slice(0, 8)}...{log.txHash.slice(-6)}
+                                  </span>
+                                )}
+                              </div>
+                              {log.status === 'FAILED' && log.cctpMessage && (
+                                <div style={{ color: 'var(--accent-red)', fontSize: '0.58rem', marginTop: '0.2rem', padding: '0.25rem', backgroundColor: 'rgba(255, 76, 76, 0.05)', borderRadius: '3px', border: '1px solid rgba(255, 76, 76, 0.1)' }}>
+                                  ⚠️ {log.cctpMessage}
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                  </div>
+
                 </div>
-              </div>
+              )}
 
             </div>
           )}
