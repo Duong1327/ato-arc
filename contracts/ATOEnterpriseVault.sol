@@ -96,11 +96,17 @@ contract ATOEnterpriseVault {
     address[] public registeredTokens;
     mapping(address => bool) public isTokenRegistered;
 
+    // Treasury Index variables
+    address[] public indexTokens;
+    mapping(address => uint256) public targetWeights; // in basis points (10000 = 100%)
+    event TargetWeightsUpdated(address[] tokens, uint256[] weights);
+
     // Factoring Facility variables
     address public factoringFacilityAddress;
     mapping(uint256 => address) public milestonePurchaser;
     event FactoringFacilityUpdated(address indexed oldFacility, address indexed newFacility);
     event FactoringPurchaserRegistered(uint256 indexed milestoneId, address indexed purchaser);
+
 
     // --- EVENTS ---
     event AgentStatusUpdated(address indexed agent, bool indexed status);
@@ -292,6 +298,38 @@ contract ATOEnterpriseVault {
         registeredTokens.push(tokenAddress);
         emit TokenRegistered(tokenAddress);
     }
+
+    /**
+     * @notice Allows owners to set target index weights for registered tokens.
+     */
+    function setTargetWeights(address[] calldata tokens, uint256[] calldata weights) external onlyOwner {
+        if (tokens.length != weights.length) revert InvalidThreshold();
+        
+        // Reset weights of previously registered index tokens
+        for (uint256 i = 0; i < indexTokens.length; i++) {
+            targetWeights[indexTokens[i]] = 0;
+        }
+        delete indexTokens;
+
+        uint256 totalWeight = 0;
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            if (token == address(0) || !isTokenRegistered[token]) revert InvalidAddress();
+            targetWeights[token] = weights[i];
+            indexTokens.push(token);
+            totalWeight += weights[i];
+        }
+        if (totalWeight != 10000) revert InvalidThreshold();
+        emit TargetWeightsUpdated(tokens, weights);
+    }
+
+    /**
+     * @notice Returns the list of index tokens.
+     */
+    function getIndexTokens() external view returns (address[] memory) {
+        return indexTokens;
+    }
+
 
     /**
      * @notice Allows owners to update the StableFX trading contract address.
