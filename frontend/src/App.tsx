@@ -129,7 +129,26 @@ export default function App() {
     }
   }, [vaultAddress]);
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing' | 'webhooks' | 'banking'>('dashboard');
+
+  const [passkeyAccount, setPasskeyAccount] = useState<{
+    address: string;
+    username: string;
+    credentialId: string;
+    isRegistered: boolean;
+  } | null>(() => {
+    const stored = localStorage.getItem('ato_passkey_account');
+    return stored ? JSON.parse(stored) : null;
+  });
+
+  const [isOnboardingPasskey, setIsOnboardingPasskey] = useState(false);
+  const [passkeyUsername, setPasskeyUsername] = useState('');
+  const [passkeyStep, setPasskeyStep] = useState<number>(0); // 0: idle, 1: generating challenge, 2: touchid, 3: deploying SCA, 4: done
+
+  // Biometric Pop-up Dialog state
+  const [isBiometricPromptOpen, setIsBiometricPromptOpen] = useState(false);
+  const [biometricPromptTitle, setBiometricPromptTitle] = useState('');
+  const [biometricScanStatus, setBiometricScanStatus] = useState<'idle' | 'scanning' | 'success' | 'failed'>('idle');
 
   // Gateway Billing State
   const [gatewayState, setGatewayState] = useState<{
@@ -218,24 +237,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [passkeyAccount, connectedAddress]);
 
-  const [passkeyAccount, setPasskeyAccount] = useState<{
-    address: string;
-    username: string;
-    credentialId: string;
-    isRegistered: boolean;
-  } | null>(() => {
-    const stored = localStorage.getItem('ato_passkey_account');
-    return stored ? JSON.parse(stored) : null;
-  });
 
-  const [isOnboardingPasskey, setIsOnboardingPasskey] = useState(false);
-  const [passkeyUsername, setPasskeyUsername] = useState('');
-  const [passkeyStep, setPasskeyStep] = useState<number>(0); // 0: idle, 1: generating challenge, 2: touchid, 3: deploying SCA, 4: done
-
-  // Biometric Pop-up Dialog state
-  const [isBiometricPromptOpen, setIsBiometricPromptOpen] = useState(false);
-  const [biometricPromptTitle, setBiometricPromptTitle] = useState('');
-  const [biometricScanStatus, setBiometricScanStatus] = useState<'idle' | 'scanning' | 'success' | 'failed'>('idle');
   
   // Ledger Balances (ERC-20 uses 6 decimals; L1 native uses 18 decimals)
   const [vaultBalanceERC20, setVaultBalanceERC20] = useState<number>(1520380.00);
@@ -268,6 +270,23 @@ export default function App() {
   const [cctpAmount, setCctpAmount] = useState<string>('150.00');
   const [cctpStep, setCctpStep] = useState<number>(0); // 0: idle, 1: approving, 2: burning, 3: completed
   const [cctpTxHash, setCctpTxHash] = useState<string>('');
+
+  // --- BANK PORTAL INTEGRATION STATE ---
+  const [bankAccounts, setBankAccounts] = useState<any[]>([]);
+  const [wireTransactions, setWireTransactions] = useState<any[]>([]);
+  const [bankName, setBankName] = useState('');
+  const [accountNumber, setAccountNumber] = useState('');
+  const [routingNumber, setRoutingNumber] = useState('');
+  const [sweepThreshold, setSweepThreshold] = useState<number>(100000);
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [payoutLoading, setPayoutLoading] = useState(false);
+  const [wireLoading, setWireLoading] = useState(false);
+  const [selectedBankAccountId, setSelectedBankAccountId] = useState('');
+  const [payoutAmount, setPayoutAmount] = useState('');
+  const [simulateWireAmount, setSimulateWireAmount] = useState('');
+  const [activeOwnerVerified, setActiveOwnerVerified] = useState(false);
+  const [withdrawalLimit] = useState<number>(50000);
+  const [multiSigApproved, setMultiSigApproved] = useState(false);
 
   // Compliance Address Registry (Mock Pre-flight registry for Sandbox Mode)
   const [complianceRegistry, setComplianceRegistry] = useState<ComplianceAddress[]>([
@@ -1264,6 +1283,120 @@ export default function App() {
     addLog('RISK_OFFICER', `Compliance screening complete. Decision: ${decision}. Score: ${score}/100.`, decision === 'APPROVED' ? 'SUCCESS' : 'WARNING');
   };
 
+  // Webhooks & ERP Sync state
+  const [backendInvoices, setBackendInvoices] = useState<any[]>([]);
+  const [backendTransactions, setBackendTransactions] = useState<any[]>([]);
+  const [syncMetrics, setSyncMetrics] = useState<any>({
+    totalLogs: 0,
+    processed: 0,
+    duplicates: 0,
+    ignored: 0,
+    failed: 0,
+    health: 'DISCONNECTED'
+  });
+  const [recentWebhookLogs, setRecentWebhookLogs] = useState<any[]>([]);
+  const [backendConnected, setBackendConnected] = useState<boolean>(false);
+
+  const fetchBackendData = async () => {
+    try {
+      const baseUrl = 'http://localhost:3001';
+      const invoicesRes = await fetch(`${baseUrl}/api/invoices`);
+      const invoicesData = await invoicesRes.json();
+      setBackendInvoices(invoicesData);
+      
+      const txRes = await fetch(`${baseUrl}/api/transactions`);
+      const txData = await txRes.json();
+      setBackendTransactions(txData);
+
+      const metricsRes = await fetch(`${baseUrl}/api/metrics`);
+      const metricsData = await metricsRes.json();
+      setSyncMetrics(metricsData.metrics);
+      setRecentWebhookLogs(metricsData.recentLogs);
+
+      const banksRes = await fetch(`${baseUrl}/api/banks`);
+      const banksData = await banksRes.json();
+      setBankAccounts(banksData);
+
+      const wiresRes = await fetch(`${baseUrl}/api/banks/wires`);
+      const wiresData = await wiresRes.json();
+      setWireTransactions(wiresData);
+      
+      setBackendConnected(true);
+    } catch (err) {
+      setBackendConnected(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchBackendData();
+    const interval = setInterval(fetchBackendData, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const syncPaymentToBackend = async (txHash: string) => {
+    try {
+      const baseUrl = 'http://localhost:3001';
+      
+      // 1. Create the pending Invoice
+      const invoicePayload = {
+        id: invoice.id,
+        amount: parseFloat(invoice.amountUSDC),
+        token: 'USDC',
+        recipient: invoice.recipientAddress,
+        type: invoice.type,
+        milestoneId: invoice.milestoneId || null,
+        status: 'PENDING'
+      };
+      
+      await fetch(`${baseUrl}/api/invoices`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(invoicePayload)
+      });
+
+      // 2. Create the pending Transaction
+      const txPayload = {
+        id: txHash,
+        invoiceId: invoice.id,
+        walletId: vaultAddress || '0xSandboxVault',
+        amount: parseFloat(invoice.amountUSDC),
+        status: 'PENDING',
+        blockchainTxHash: txHash
+      };
+
+      await fetch(`${baseUrl}/api/transactions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(txPayload)
+      });
+      
+      addLog('SYSTEM', `ERP Sync: Registered pending transaction ${txHash.slice(0, 10)}... in backend.`, 'INFO');
+
+      // 3. Simulate Circle Webhook delivery after 3 seconds
+      setTimeout(async () => {
+        try {
+          const webhookPayload = {
+            eventId: 'evt_sim_' + Math.floor(Math.random() * 1000000),
+            eventType: 'transfers.updated',
+            transactionId: txHash,
+            status: 'complete',
+            blockchainTxHash: txHash
+          };
+
+          await fetch(`${baseUrl}/api/simulate-webhook`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(webhookPayload)
+          });
+        } catch (webhookErr) {
+          console.error('Failed to trigger simulated webhook:', webhookErr);
+        }
+      }, 3000);
+    } catch (err) {
+      console.warn('Backend server disconnected. Skipping ERP DB state sync.', err);
+    }
+  };
+
   // --- SUBMIT PAYOUT TO SMART CONTRACT ---
   const handleSimulatePayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1418,6 +1551,9 @@ export default function App() {
           refetchVaultBalances();
           refetchMilestoneCount();
 
+          // Sync with ERP webhook backend
+          await syncPaymentToBackend(txHash);
+
           setPipelineStep(4);
           addLog('SYSTEM', `Arc L1 transaction finalized successfully.`, 'SUCCESS');
           addLog('AUDITOR', `Ledgers reconciled. Balance updated successfully.`, 'SUCCESS');
@@ -1453,6 +1589,9 @@ export default function App() {
         gasPaid: `0.042 USDC`,
         finalityMs: 642 
       });
+
+      // Sync with ERP webhook backend
+      await syncPaymentToBackend(randomHash);
 
       setPipelineStep(4);
       addLog('ALLOCATOR', `Simulation success! Circle DCW simulated successfully.`, 'SUCCESS');
@@ -1967,6 +2106,191 @@ export default function App() {
     }
   };
 
+  // --- BANK PORTAL OPERATIONS ---
+  const handleLinkBankAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!bankName || !accountNumber || !routingNumber) {
+      alert("Please enter all bank details.");
+      return;
+    }
+    setLinkLoading(true);
+    try {
+      addLog('SYSTEM', `Requesting Bank Account Connection at ${bankName}...`, 'INFO');
+      const response = await fetch('http://localhost:3001/api/banks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bankName, accountNumber, routingNumber })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        addLog('SYSTEM', `Bank account connected successfully! ID: ${data.id}`, 'SUCCESS');
+        setBankName('');
+        setAccountNumber('');
+        setRoutingNumber('');
+        fetchBackendData();
+      } else {
+        addLog('SYSTEM', `Failed to connect bank account: ${data.error}`, 'ERROR');
+      }
+    } catch (err: any) {
+      addLog('SYSTEM', `Connection error: ${err.message}`, 'ERROR');
+    } finally {
+      setLinkLoading(false);
+    }
+  };
+
+  const handleInitiatePayout = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedBankAccountId || !payoutAmount) {
+      alert("Please select a bank account and enter an amount.");
+      return;
+    }
+
+    const amt = parseFloat(payoutAmount);
+    if (isNaN(amt) || amt <= 0) {
+      alert("Invalid payout amount.");
+      return;
+    }
+
+    // Owner approval check requirement
+    if (!activeOwnerVerified) {
+      addLog('SYSTEM', `Payout request rejected: Administrative owner signature verification required. Please complete biometrics/verification.`, 'ERROR');
+      alert("Owner approval check failed. Please verify owner identity first.");
+      return;
+    }
+
+    // Withdrawal limits check requirement
+    if (amt > withdrawalLimit) {
+      // Check multi-sig approval if limit exceeded
+      if (!multiSigApproved) {
+        addLog('SYSTEM', `Payout of $${amt.toLocaleString()} exceeds single-sign limit of $${withdrawalLimit.toLocaleString()}. Multi-sig authorization (Team Approval) required.`, 'WARNING');
+        alert(`This withdrawal exceeds your limit of $${withdrawalLimit.toLocaleString()}. Multi-sig approval is required.`);
+        return;
+      }
+    }
+
+    setPayoutLoading(true);
+    try {
+      addLog('SYSTEM', `Initiating Bank Payout / Treasury Sweep of $${amt.toLocaleString()} to account ${selectedBankAccountId}...`, 'INFO');
+      const response = await fetch('http://localhost:3001/api/banks/payout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bankAccountId: selectedBankAccountId, amount: amt })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        addLog('SYSTEM', `Traditional Bank Payout initiated. Wire Reference: ${data.trackingRef}. Status: PENDING.`, 'SUCCESS');
+        
+        // Mock sub-decimal fee reduction and on-chain sweep burns
+        setVaultBalanceERC20(prev => prev - amt);
+        setPayoutAmount('');
+        setMultiSigApproved(false); // reset multi-sig approval after use
+        fetchBackendData();
+
+        // Simulate Circle Mint webhook updates payouts.updated status to complete after 3 seconds
+        setTimeout(async () => {
+          try {
+            const webhookRes = await fetch('http://localhost:3001/api/simulate-webhook', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                eventId: 'evt_payout_sim_' + Math.floor(Math.random() * 1000000),
+                eventType: 'payouts.updated',
+                transactionId: data.id,
+                status: 'complete'
+              })
+            });
+            if (webhookRes.ok) {
+              addLog('SYSTEM', `Circle webhook [payouts.updated] verified. Bank payout ID ${data.id} is now complete and settled in fiat registry.`, 'SUCCESS');
+              fetchBackendData();
+            }
+          } catch (webhookErr) {
+            console.error('Failed to simulate payout webhook:', webhookErr);
+          }
+        }, 3000);
+
+      } else {
+        addLog('SYSTEM', `Failed to initiate bank payout: ${data.error}`, 'ERROR');
+      }
+    } catch (err: any) {
+      addLog('SYSTEM', `Payout error: ${err.message}`, 'ERROR');
+    } finally {
+      setPayoutLoading(false);
+    }
+  };
+
+  const handleSimulateWire = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedBankAccountId || !simulateWireAmount) {
+      alert("Please select a bank account and enter an amount.");
+      return;
+    }
+
+    const amt = parseFloat(simulateWireAmount);
+    if (isNaN(amt) || amt <= 0) {
+      alert("Invalid wire amount.");
+      return;
+    }
+
+    setWireLoading(true);
+    try {
+      addLog('SYSTEM', `Simulating incoming wire deposit of $${amt.toLocaleString()} to account ${selectedBankAccountId}...`, 'INFO');
+      await fetch('http://localhost:3001/api/simulate-webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: 'evt_wire_sim_init_' + Math.floor(Math.random() * 1000000),
+          eventType: 'wires.updated',
+          transactionId: 'wire_in_' + Math.floor(Math.random() * 1000000),
+          status: 'complete'
+        })
+      });
+      
+      const simulateRes = await fetch('http://localhost:3001/api/banks/simulate-wire', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bankAccountId: selectedBankAccountId, amount: amt })
+      });
+      const data = await simulateRes.json();
+      if (simulateRes.ok) {
+        addLog('SYSTEM', `Incoming wire processed! Minted $${amt.toLocaleString()} USDC to vault. Tx Hash: ${data.usdcTxHash.slice(0, 15)}...`, 'SUCCESS');
+        
+        // Add to local balance
+        setVaultBalanceERC20(prev => prev + amt);
+        setSimulateWireAmount('');
+        fetchBackendData();
+
+        // Simulate Circle webhook updates wires.updated status to complete after 3 seconds
+        setTimeout(async () => {
+          try {
+            const webhookRes = await fetch('http://localhost:3001/api/simulate-webhook', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                eventId: 'evt_wire_sim_' + Math.floor(Math.random() * 1000000),
+                eventType: 'wires.updated',
+                transactionId: data.id,
+                status: 'complete'
+              })
+            });
+            if (webhookRes.ok) {
+              addLog('SYSTEM', `Circle webhook [wires.updated] verified. Wire deposit ID ${data.id} is finalized.`, 'SUCCESS');
+              fetchBackendData();
+            }
+          } catch (webhookErr) {
+            console.error('Failed to simulate wire webhook:', webhookErr);
+          }
+        }, 3000);
+
+      } else {
+        addLog('SYSTEM', `Failed to simulate incoming wire: ${data.error}`, 'ERROR');
+      }
+    } catch (err: any) {
+      addLog('SYSTEM', `Wire simulation error: ${err.message}`, 'ERROR');
+    } finally {
+      setWireLoading(false);
+    }
+  };
+
   // Register monitored targets
   const handleCreateComplianceAddress = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2175,6 +2499,28 @@ export default function App() {
               </svg>
               Gateway Billing
             </button>
+
+            <button
+              onClick={() => setActiveTab('webhooks')}
+              className={`nav-button ${activeTab === 'webhooks' ? 'nav-button-active' : ''}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '0.75rem', opacity: 0.85 }}>
+                <path d="M22 12h-6l-3 9L9 3l-3 9H2" />
+              </svg>
+              Webhooks & ERP
+            </button>
+
+            <button
+              onClick={() => setActiveTab('banking')}
+              className={`nav-button ${activeTab === 'banking' ? 'nav-button-active' : ''}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '0.75rem', opacity: 0.85 }}>
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M3 9h18" />
+                <path d="M9 21V9" />
+              </svg>
+              Bank Portal
+            </button>
           </div>
 
           {/* Infrastructure Quick Stats */}
@@ -2195,6 +2541,13 @@ export default function App() {
               <div className="metric-row">
                 <span className="metric-label">Currency</span>
                 <span className="metric-value" style={{ color: 'var(--accent-purple)' }}>USDC</span>
+              </div>
+
+              <div className="metric-row">
+                <span className="metric-label">ERP Sync</span>
+                <span className="metric-value" style={{ color: backendConnected ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                  {backendConnected ? 'Connected' : 'Disconnected'}
+                </span>
               </div>
 
               <div className="divider" style={{ margin: '0.25rem 0' }}></div>
@@ -4145,6 +4498,723 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 8: CIRCLE WEBHOOKS & REAL-TIME ERP STATE SYNC */}
+          {activeTab === 'webhooks' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              
+              {/* Header card with Sync Status */}
+              <div className="glass-panel" style={{ padding: '1.5rem', position: 'relative' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                  <div>
+                    <h2 style={{ fontSize: '1.2rem', fontWeight: 'bold', color: '#fff' }}>Circle Webhook & ERP Sync Engine</h2>
+                    <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                      Real-time ledgers synchronization via secure asymmetric Circle Webhooks directly pushing finalized payments to PostgreSQL database.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    <span className={`badge ${backendConnected ? 'badge-green' : 'badge-pink'}`}>
+                      {backendConnected ? 'Webhooks Active' : 'Backend Offline'}
+                    </span>
+                    <div className="pulse-container" style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: backendConnected ? 'var(--accent-green)' : 'var(--accent-red)', boxShadow: backendConnected ? '0 0 10px var(--accent-green)' : '0 0 10px var(--accent-red)' }}></div>
+                  </div>
+                </div>
+
+                <div className="divider" style={{ margin: '1rem 0' }}></div>
+                
+                {/* Stats cards grid */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '1rem' }}>
+                  <div className="glass-panel" style={{ padding: '0.75rem', textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Total Webhook Logs</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#fff', margin: '0.25rem 0' }}>{syncMetrics?.totalLogs || 0}</div>
+                    <div style={{ fontSize: '0.55rem', color: 'var(--accent-cyan)' }}>events captured</div>
+                  </div>
+                  <div className="glass-panel" style={{ padding: '0.75rem', textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Processed Updates</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: 'var(--accent-green)', margin: '0.25rem 0' }}>{syncMetrics?.processed || 0}</div>
+                    <div style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>reconciled to ERP</div>
+                  </div>
+                  <div className="glass-panel" style={{ padding: '0.75rem', textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Duplicates Blocked</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: 'var(--accent-purple)', margin: '0.25rem 0' }}>{syncMetrics?.duplicates || 0}</div>
+                    <div style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>idempotent protection</div>
+                  </div>
+                  <div className="glass-panel" style={{ padding: '0.75rem', textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Ignored Events</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: 'var(--accent-amber)', margin: '0.25rem 0' }}>{syncMetrics?.ignored || 0}</div>
+                    <div style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>unlinked transaction refs</div>
+                  </div>
+                  <div className="glass-panel" style={{ padding: '0.75rem', textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ fontSize: '0.62rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Failed / Errors</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: syncMetrics?.failed > 0 ? 'var(--accent-red)' : '#fff', margin: '0.25rem 0' }}>{syncMetrics?.failed || 0}</div>
+                    <div style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>bad signatures / network</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Main sync table */}
+              <div style={{ display: 'grid', gridTemplateColumns: '3fr 2fr', gap: '1.5rem', alignItems: 'start' }}>
+                
+                {/* ERP Invoice Database Ledgers */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                    <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold' }}>ERP Database Invoice Registry</h3>
+                    <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)' }}>Table: Invoices</span>
+                  </div>
+
+                  <div className="table-responsive">
+                    <table className="hex-blueprint-table">
+                      <thead>
+                        <tr>
+                          <th>Ref ID</th>
+                          <th>Recipient</th>
+                          <th>Amount</th>
+                          <th>Type</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {backendInvoices.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.7rem' }}>
+                              No invoices found in database. Send a payment to register records!
+                            </td>
+                          </tr>
+                        ) : (
+                          backendInvoices.map((inv: any) => (
+                            <tr key={inv.id}>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.68rem', fontWeight: 'bold', color: '#fff' }}>
+                                {inv.id}
+                              </td>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.6rem', color: 'var(--text-secondary)' }}>
+                                {inv.recipient.slice(0, 8)}...{inv.recipient.slice(-6)}
+                              </td>
+                              <td style={{ color: 'var(--accent-cyan)', fontSize: '0.68rem', fontWeight: 'bold' }}>
+                                {inv.amount.toFixed(2)} {inv.token}
+                              </td>
+                              <td style={{ fontSize: '0.62rem', textTransform: 'capitalize' }}>
+                                <span className={`badge ${inv.type === 'milestone' ? 'badge-purple' : 'badge-cyan'}`} style={{ padding: '0.1rem 0.3rem', fontSize: '0.5rem' }}>
+                                  {inv.type}
+                                </span>
+                              </td>
+                              <td>
+                                <span className={`badge ${inv.status === 'SETTLED' ? 'badge-green' : inv.status === 'FAILED' ? 'badge-pink' : 'badge-amber'}`} style={{ fontSize: '0.55rem' }}>
+                                  {inv.status}
+                                </span>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Right Column: Webhook Simulator & Sync Logs */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                  
+                  {/* Webhook Developer Manual Simulator */}
+                  <div className="glass-panel" style={{ padding: '1.25rem' }}>
+                    <h3 style={{ fontSize: '0.85rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.75rem' }}>
+                      🛠️ Circle Webhook Simulator
+                    </h3>
+                    <p style={{ fontSize: '0.62rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                      Simulate a payload delivery from Circle Notifications to test the asymmetric verification and SQL sync logic instantly.
+                    </p>
+
+                    <form onSubmit={async (e) => {
+                      e.preventDefault();
+                      const form = e.currentTarget;
+                      const refId = (form.elements.namedItem('simInvoiceId') as HTMLInputElement).value;
+                      const statusVal = (form.elements.namedItem('simStatus') as HTMLSelectElement).value;
+                      const eventTypeVal = (form.elements.namedItem('simEventType') as HTMLSelectElement).value;
+
+                      if (!refId) return;
+
+                      try {
+                        addLog('SYSTEM', `Dispatched manually simulated webhook event for invoice ${refId} with status ${statusVal}...`, 'INFO');
+                        const res = await fetch('http://localhost:3001/api/simulate-webhook', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            eventId: 'manual_' + Math.floor(Math.random() * 1000000),
+                            eventType: eventTypeVal,
+                            transactionId: refId,
+                            status: statusVal
+                          })
+                        });
+                        const data = await res.json();
+                        if (res.ok) {
+                          addLog('SYSTEM', `Webhook simulation processed. Backend response: ${JSON.stringify(data.backendResponse)}`, 'SUCCESS');
+                          fetchBackendData();
+                        } else {
+                          addLog('SYSTEM', `Simulation failed: ${data.error}`, 'ERROR');
+                        }
+                      } catch (err: any) {
+                        addLog('SYSTEM', `Simulation connection error: ${err.message}`, 'ERROR');
+                      }
+                    }}>
+                      <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                        <label style={{ fontSize: '0.6rem' }}>Select Invoice Reference</label>
+                        <select name="simInvoiceId" className="form-select" style={{ fontSize: '0.65rem', padding: '0.3rem' }}>
+                          {backendInvoices.length === 0 ? (
+                            <option value="">-- No Invoices in DB --</option>
+                          ) : (
+                            backendInvoices.map((inv: any) => (
+                              <option key={inv.id} value={inv.id}>{inv.id} (${inv.amount} USDC)</option>
+                            ))
+                          )}
+                        </select>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
+                        <div className="form-group">
+                          <label style={{ fontSize: '0.6rem' }}>Target Status</label>
+                          <select name="simStatus" className="form-select" style={{ fontSize: '0.65rem', padding: '0.3rem' }}>
+                            <option value="complete">complete (Success)</option>
+                            <option value="failed">failed (Failure)</option>
+                          </select>
+                        </div>
+                        <div className="form-group">
+                          <label style={{ fontSize: '0.6rem' }}>Circle Event Type</label>
+                          <select name="simEventType" className="form-select" style={{ fontSize: '0.65rem', padding: '0.3rem' }}>
+                            <option value="transfers.updated">transfers.updated</option>
+                            <option value="wallets.transaction.succeeded">transaction.succeeded</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <button type="submit" disabled={!backendConnected || backendInvoices.length === 0} className="hex-blueprint-btn" style={{ fontSize: '0.65rem', padding: '0.4rem' }}>
+                        Dispatch Webhook Delivery
+                      </button>
+                    </form>
+                  </div>
+
+                  {/* Webhook Log History */}
+                  <div className="glass-panel" style={{ padding: '1.25rem' }}>
+                    <h3 style={{ fontSize: '0.85rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.75rem' }}>
+                      📋 Raw Webhook Logs (SQLite/Prisma)
+                    </h3>
+                    
+                    <div style={{ maxHeight: '240px', overflowY: 'auto' }}>
+                      {recentWebhookLogs.length === 0 ? (
+                        <p style={{ fontSize: '0.65rem', color: 'var(--text-muted)', textAlign: 'center', padding: '1rem' }}>
+                          No webhook logs captured yet.
+                        </p>
+                      ) : (
+                        recentWebhookLogs.map((log: any) => (
+                          <div key={log.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', padding: '0.5rem', marginBottom: '0.5rem', backgroundColor: 'rgba(255,255,255,0.01)', borderLeft: `2px solid ${log.status === 'PROCESSED' ? 'var(--accent-green)' : log.status === 'DUPLICATE' ? 'var(--accent-purple)' : 'var(--text-muted)'}` }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.58rem' }}>
+                              <span style={{ color: '#fff', fontWeight: 'bold' }}>{log.eventType}</span>
+                              <span style={{ color: 'var(--text-muted)' }}>{new Date(log.createdAt).toLocaleTimeString()}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.52rem' }}>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>ID: {log.eventId.slice(0, 15)}...</span>
+                              <span style={{ color: log.status === 'PROCESSED' ? 'var(--accent-green)' : log.status === 'DUPLICATE' ? 'var(--accent-purple)' : 'var(--accent-amber)' }}>{log.status}</span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                </div>
+
+              </div>
+
+              {/* Transactions Ledger */}
+              <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold', marginBottom: '1rem' }}>On-Chain Transaction & Reconciliation Registry</h3>
+                <div className="table-responsive">
+                  <table className="hex-blueprint-table">
+                    <thead>
+                      <tr>
+                        <th>Transaction ID / Hash</th>
+                        <th>Invoice Ref</th>
+                        <th>Sender Wallet</th>
+                        <th>Reconciled Amount</th>
+                        <th>Date & Time</th>
+                        <th>Sync Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {backendTransactions.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.7rem' }}>
+                            No transactions synced. Run a payment or trigger webhook to view ledger details.
+                          </td>
+                        </tr>
+                      ) : (
+                        backendTransactions.map((tx: any) => (
+                          <tr key={tx.id}>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.62rem', color: 'var(--accent-cyan)' }}>
+                              <a href={`https://testnet.arcscan.app/tx/${tx.blockchainTxHash || tx.id}`} target="_blank" rel="noreferrer" style={{ textDecoration: 'none', color: 'inherit' }}>
+                                {tx.id.slice(0, 16)}...{tx.id.slice(-8)} ↗
+                              </a>
+                            </td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: '#fff' }}>
+                              {tx.invoiceId}
+                            </td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.6rem', color: 'var(--text-secondary)' }}>
+                              {tx.walletId}
+                            </td>
+                            <td style={{ fontSize: '0.68rem', fontWeight: 'bold', color: '#fff' }}>
+                              ${tx.amount.toFixed(2)} USDC
+                            </td>
+                            <td style={{ fontSize: '0.62rem', color: 'var(--text-muted)' }}>
+                              {new Date(tx.createdAt).toLocaleString()}
+                            </td>
+                            <td>
+                              <span className={`badge ${tx.status === 'SUCCESS' ? 'badge-green' : tx.status === 'FAILED' ? 'badge-pink' : 'badge-amber'}`} style={{ fontSize: '0.55rem' }}>
+                                {tx.status}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 9: CIRCLE MINT & CPN TRADITIONAL BANK RAIL PORTAL */}
+          {activeTab === 'banking' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              
+              {/* Header card with Sync Status */}
+              <div className="glass-panel" style={{ padding: '1.5rem', position: 'relative', overflow: 'hidden' }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '-40px',
+                  right: '-40px',
+                  width: '160px',
+                  height: '160px',
+                  borderRadius: '50%',
+                  background: 'radial-gradient(circle, rgba(0, 240, 255, 0.08) 0%, transparent 70%)',
+                  zIndex: 0
+                }}></div>
+                <div style={{ position: 'relative', zIndex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                  <div>
+                    <h2 style={{ fontSize: '1.2rem', fontWeight: 'bold', color: '#fff' }}>Circle Mint & CPN Traditional Banking Rails</h2>
+                    <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                      Bridge traditional bank deposits with digital stablecoins. Execute Wire/ACH payouts and auto-mint USDC directly to your treasury.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    <span className={`badge ${backendConnected ? 'badge-green' : 'badge-pink'}`}>
+                      {backendConnected ? 'Banking APIs Online' : 'APIs Offline'}
+                    </span>
+                    <div className="pulse-container" style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: backendConnected ? 'var(--accent-green)' : 'var(--accent-red)', boxShadow: backendConnected ? '0 0 10px var(--accent-green)' : '0 0 10px var(--accent-red)' }}></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Grid: Link Bank and Sweep Controls */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
+                
+                {/* 1. Link Bank Account Card */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    🔌 Connect Corporate Bank Account
+                  </h3>
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                    Link your corporate bank account via Circle CPN to authorize traditional fiat deposits and sweeping payouts.
+                  </p>
+                  
+                  <form onSubmit={handleLinkBankAccount} className="form-container" style={{ gap: '0.85rem' }}>
+                    <div className="form-group">
+                      <label>Bank Name</label>
+                      <input 
+                        type="text" 
+                        value={bankName}
+                        onChange={e => setBankName(e.target.value)}
+                        placeholder="e.g. Silicon Valley Bank"
+                        className="form-input" 
+                        required
+                      />
+                    </div>
+                    <div className="form-group" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                      <div>
+                        <label>Routing Number (9-digit)</label>
+                        <input 
+                          type="text" 
+                          value={routingNumber}
+                          onChange={e => setRoutingNumber(e.target.value)}
+                          placeholder="e.g. 021000021"
+                          maxLength={9}
+                          className="form-input" 
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label>Account Number</label>
+                        <input 
+                          type="password" 
+                          value={accountNumber}
+                          onChange={e => setAccountNumber(e.target.value)}
+                          placeholder="••••••••"
+                          className="form-input" 
+                          required
+                        />
+                      </div>
+                    </div>
+                    
+                    <button type="submit" disabled={linkLoading} className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem', marginTop: '0.5rem' }}>
+                      {linkLoading ? 'Linking Bank Account...' : 'Link Bank Account'}
+                    </button>
+                  </form>
+
+                  {/* Connected Accounts List */}
+                  <div style={{ marginTop: '1.5rem', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '1rem' }}>
+                    <h4 style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Connected Bank Accounts</h4>
+                    {bankAccounts.length === 0 ? (
+                      <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', textAlign: 'center', padding: '1rem', background: 'rgba(255,255,255,0.01)', borderRadius: '4px' }}>
+                        No connected bank accounts found. Link an account above.
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        {bankAccounts.map((bank: any) => (
+                          <div 
+                            key={bank.id}
+                            onClick={() => setSelectedBankAccountId(bank.id)}
+                            style={{
+                              padding: '0.75rem',
+                              borderRadius: '6px',
+                              border: `1px solid ${selectedBankAccountId === bank.id ? 'var(--accent-cyan)' : 'rgba(255,255,255,0.03)'}`,
+                              background: selectedBankAccountId === bank.id ? 'rgba(0, 240, 255, 0.02)' : 'rgba(0,0,0,0.2)',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center'
+                            }}
+                          >
+                            <div>
+                              <div style={{ fontSize: '0.75rem', fontWeight: 'bold', color: '#fff' }}>{bank.bankName}</div>
+                              <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>ID: {bank.id.slice(0, 15)}...</div>
+                            </div>
+                            <div style={{ textAlign: 'right' }}>
+                              <span className="badge badge-green" style={{ fontSize: '0.55rem' }}>{bank.status}</span>
+                              <div style={{ fontSize: '0.6rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>Acct: {bank.accountNumber}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 2. Treasury Sweeps & Payout Manager */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    💸 Treasury Payout & Sweeper
+                  </h3>
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                    Sweep excess digital treasury assets. Burning USDC on-chain converts it back to USD/EUR fiat in your bank.
+                  </p>
+                  
+                  <form onSubmit={handleInitiatePayout} className="form-container" style={{ gap: '0.85rem' }}>
+                    <div className="form-group">
+                      <label>Target Bank Account</label>
+                      <select 
+                        value={selectedBankAccountId} 
+                        onChange={e => setSelectedBankAccountId(e.target.value)} 
+                        className="form-select" 
+                        required
+                      >
+                        <option value="">-- Select Bank --</option>
+                        {bankAccounts.map((bank: any) => (
+                          <option key={bank.id} value={bank.id}>{bank.bankName} ({bank.accountNumber})</option>
+                        ))}
+                      </select>
+                    </div>
+                    
+                    <div className="form-group">
+                      <label>Sweep Amount (USDC)</label>
+                      <div style={{ position: 'relative' }}>
+                        <input 
+                          type="number" 
+                          value={payoutAmount}
+                          onChange={e => setPayoutAmount(e.target.value)}
+                          placeholder="0.00"
+                          className="form-input" 
+                          style={{ paddingRight: '3.5rem' }}
+                          required
+                        />
+                        <span style={{ position: 'absolute', right: '0.75rem', top: '50%', transform: 'translateY(-50%)', fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 'bold' }}>USDC</span>
+                      </div>
+                    </div>
+
+                    {/* Operational Safety Limits */}
+                    <div style={{ background: 'rgba(255,255,255,0.01)', padding: '0.75rem', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)', fontSize: '0.65rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Single-Sign Limit:</span>
+                        <strong style={{ color: '#fff' }}>${withdrawalLimit.toLocaleString()} USD</strong>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Administrative Owner Verification:</span>
+                        <span style={{ color: activeOwnerVerified ? 'var(--accent-green)' : 'var(--accent-pink)', fontWeight: 'bold' }}>
+                          {activeOwnerVerified ? '✓ VERIFIED' : '✗ REQUIRED'}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Multi-Sig Team Override:</span>
+                        <span style={{ color: multiSigApproved ? 'var(--accent-green)' : 'var(--text-muted)', fontWeight: 'bold' }}>
+                          {multiSigApproved ? '✓ GRANTED' : 'PENDING'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Controls Row */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                      <button 
+                        type="button" 
+                        onClick={() => {
+                          setBiometricPromptTitle("Verify Corporate Admin Signer identity for bank wire approvals");
+                          setIsBiometricPromptOpen(true);
+                          setBiometricScanStatus('scanning');
+                          setTimeout(() => {
+                            setBiometricScanStatus('success');
+                            setTimeout(() => {
+                              setIsBiometricPromptOpen(false);
+                              setActiveOwnerVerified(true);
+                              addLog('SYSTEM', 'Biometric identity verified. Corporate Owner Check Passed.', 'SUCCESS');
+                            }, 1000);
+                          }, 1500);
+                        }}
+                        className="hex-blueprint-btn" 
+                        style={{ fontSize: '0.68rem', padding: '0.5rem', background: activeOwnerVerified ? 'rgba(57,255,20,0.05)' : 'rgba(255,255,255,0.03)', borderColor: activeOwnerVerified ? 'var(--accent-green)' : 'rgba(255,255,255,0.1)' }}
+                      >
+                        {activeOwnerVerified ? '✓ Identity Verified' : '🔑 Verify Owner (Biometrics)'}
+                      </button>
+                      
+                      <button 
+                        type="button" 
+                        onClick={() => {
+                          setMultiSigApproved(prev => !prev);
+                          addLog('SYSTEM', !multiSigApproved ? 'Multi-sig team override granted for treasury payout.' : 'Multi-sig override revoked.', 'INFO');
+                        }}
+                        className="hex-blueprint-btn" 
+                        style={{ fontSize: '0.68rem', padding: '0.5rem', background: multiSigApproved ? 'rgba(0, 240, 255, 0.05)' : 'rgba(255,255,255,0.03)', borderColor: multiSigApproved ? 'var(--accent-cyan)' : 'rgba(255,255,255,0.1)' }}
+                      >
+                        {multiSigApproved ? '✓ Multi-Sig Override' : '👥 Team Multi-Sig Override'}
+                      </button>
+                    </div>
+                    
+                    <button type="submit" disabled={payoutLoading || !selectedBankAccountId} className="hex-blueprint-btn" style={{ fontSize: '0.72rem', padding: '0.65rem', borderColor: 'var(--accent-pink)', marginTop: '0.25rem' }}>
+                      {payoutLoading ? 'Processing Treasury Sweep...' : 'Trigger Payout (Sweep to Bank)'}
+                    </button>
+                  </form>
+                </div>
+
+                {/* 3. Automatic Rule threshold and Mock Deposits */}
+                <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                  <div>
+                    <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      ⚙️ Automatic Allocations & Mock Wires
+                    </h3>
+                    <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                      Configure the automatic treasury sweeps threshold and simulate incoming wire transfers from clients.
+                    </p>
+
+                    {/* Automatic Sweeper Rules */}
+                    <div style={{ marginBottom: '1.25rem' }} className="form-container">
+                      <div className="form-group">
+                        <label>Auto-Sweep Vault Threshold (USDC)</label>
+                        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                          <input 
+                            type="number" 
+                            value={sweepThreshold} 
+                            onChange={e => setSweepThreshold(parseInt(e.target.value) || 0)} 
+                            className="form-input" 
+                            style={{ flex: 1 }}
+                          />
+                          <button 
+                            type="button" 
+                            onClick={() => {
+                              addLog('ALLOCATOR', `Treasury rules updated: Auto-sweep threshold set to $${sweepThreshold.toLocaleString()} USDC.`, 'SUCCESS');
+                              alert(`Threshold updated successfully!`);
+                            }}
+                            className="hex-blueprint-btn" 
+                            style={{ width: 'auto', fontSize: '0.68rem', padding: '0.5rem 0.75rem' }}
+                          >
+                            Save Rules
+                          </button>
+                        </div>
+                        <p style={{ fontSize: '0.58rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                          When vault balance exceeds this amount, AgentAllocator automatically sweeps the surplus to connected bank account.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '1.25rem', marginTop: 'auto' }}>
+                    <h4 style={{ fontSize: '0.75rem', color: '#fff', fontWeight: 'bold', marginBottom: '0.5rem' }}>🛠️ Simulate Incoming Wire Deposit</h4>
+                    <p style={{ fontSize: '0.62rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
+                      Send mock wire funds from customers. When Circle CPN processes the wire, digital USDC is automatically minted to your treasury vault.
+                    </p>
+                    <form onSubmit={handleSimulateWire} className="form-container" style={{ gap: '0.85rem' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '0.75rem' }}>
+                        <select 
+                          value={selectedBankAccountId} 
+                          onChange={e => setSelectedBankAccountId(e.target.value)} 
+                          className="form-select" 
+                          required
+                        >
+                          <option value="">-- Select Bank --</option>
+                          {bankAccounts.map((bank: any) => (
+                            <option key={bank.id} value={bank.id}>{bank.bankName}</option>
+                          ))}
+                        </select>
+                        <div style={{ position: 'relative' }}>
+                          <input 
+                            type="number" 
+                            value={simulateWireAmount}
+                            onChange={e => setSimulateWireAmount(e.target.value)}
+                            placeholder="Amount"
+                            className="form-input" 
+                            required
+                          />
+                        </div>
+                      </div>
+                      <button type="submit" disabled={wireLoading || !selectedBankAccountId} className="hex-blueprint-btn" style={{ fontSize: '0.68rem', padding: '0.5rem' }}>
+                        {wireLoading ? 'Processing Wire...' : 'Deliver Simulated Wire Deposit'}
+                      </button>
+                    </form>
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Side-by-Side Ledgers Section */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', alignItems: 'start' }}>
+                
+                {/* Blockchain Transaction Ledger */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                    <div>
+                      <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold' }}>🔗 Blockchain Transaction Ledger</h3>
+                      <p style={{ fontSize: '0.58rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>USDC/EURC payments reconciled on-chain</p>
+                    </div>
+                    <span className="badge badge-purple" style={{ fontSize: '0.55rem' }}>On-Chain</span>
+                  </div>
+
+                  <div className="table-responsive" style={{ maxHeight: '350px', overflowY: 'auto' }}>
+                    <table className="hex-blueprint-table">
+                      <thead>
+                        <tr>
+                          <th>Tx Hash / Reference</th>
+                          <th>Invoice Ref</th>
+                          <th>Amount</th>
+                          <th>Date</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {backendTransactions.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.65rem', padding: '2rem' }}>
+                              No blockchain transactions recorded yet.
+                            </td>
+                          </tr>
+                        ) : (
+                          backendTransactions.map((tx: any) => (
+                            <tr key={tx.id}>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.62rem', color: 'var(--accent-cyan)' }}>
+                                <a href={`https://testnet.arcscan.app/tx/${tx.blockchainTxHash || tx.id}`} target="_blank" rel="noreferrer" style={{ textDecoration: 'none', color: 'inherit' }}>
+                                  {tx.id.slice(0, 10)}... ↗
+                                </a>
+                              </td>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.62rem', color: '#fff' }}>
+                                {tx.invoiceId}
+                              </td>
+                              <td style={{ fontSize: '0.68rem', fontWeight: 'bold', color: '#fff' }}>
+                                ${tx.amount.toFixed(2)} USDC
+                              </td>
+                              <td style={{ fontSize: '0.58rem', color: 'var(--text-muted)' }}>
+                                {new Date(tx.createdAt).toLocaleTimeString()}
+                              </td>
+                              <td>
+                                <span className={`badge ${tx.status === 'SUCCESS' ? 'badge-green' : tx.status === 'FAILED' ? 'badge-pink' : 'badge-amber'}`} style={{ fontSize: '0.52rem' }}>
+                                  {tx.status}
+                                </span>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Traditional Banking Wire Ledger */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                    <div>
+                      <h3 style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 'bold' }}>🏦 Traditional Banking Wire Ledger</h3>
+                      <p style={{ fontSize: '0.58rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>Fiat wires and payouts logged via Circle Mint</p>
+                    </div>
+                    <span className="badge badge-cyan" style={{ fontSize: '0.55rem' }}>CPN / Rails</span>
+                  </div>
+
+                  <div className="table-responsive" style={{ maxHeight: '350px', overflowY: 'auto' }}>
+                    <table className="hex-blueprint-table">
+                      <thead>
+                        <tr>
+                          <th>Wire ID / Ref</th>
+                          <th>Bank Account</th>
+                          <th>Amount</th>
+                          <th>Dir</th>
+                          <th>Tracking Ref</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wireTransactions.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.65rem', padding: '2rem' }}>
+                              No traditional bank wire transactions recorded yet.
+                            </td>
+                          </tr>
+                        ) : (
+                          wireTransactions.map((wire: any) => (
+                            <tr key={wire.id}>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.62rem', color: 'var(--accent-pink)' }}>
+                                {wire.id.slice(0, 12)}...
+                              </td>
+                              <td style={{ fontSize: '0.65rem', color: '#fff' }}>
+                                {wire.bankAccount?.bankName || 'Connected Bank'}
+                              </td>
+                              <td style={{ fontSize: '0.68rem', fontWeight: 'bold', color: wire.direction === 'INFLOW' ? 'var(--accent-green)' : '#fff' }}>
+                                {wire.direction === 'INFLOW' ? '+' : '-'}${wire.amount.toFixed(2)} {wire.currency}
+                              </td>
+                              <td>
+                                <span className={`badge ${wire.direction === 'INFLOW' ? 'badge-green' : 'badge-purple'}`} style={{ fontSize: '0.52rem' }}>
+                                  {wire.direction}
+                                </span>
+                              </td>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.6rem', color: 'var(--text-secondary)' }}>
+                                {wire.trackingRef || 'None'}
+                              </td>
+                              <td>
+                                <span className={`badge ${wire.status === 'SUCCESS' ? 'badge-green' : wire.status === 'FAILED' ? 'badge-pink' : 'badge-amber'}`} style={{ fontSize: '0.52rem' }}>
+                                  {wire.status}
+                                </span>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
               </div>
 
             </div>

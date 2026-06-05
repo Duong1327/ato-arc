@@ -4,6 +4,10 @@ import * as dotenv from 'dotenv';
 import crypto from 'crypto';
 import { GatewayBillingManager } from './gatewayBilling';
 import { CircleGatewaySDK } from '@circle-fin/gateway';
+import { BankIntegrator } from './bankIntegrator';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 // Load environment variables for local secrets management
 dotenv.config();
@@ -518,6 +522,46 @@ class AgentAllocator {
             }
         } catch (error: any) {
             console.error(`[Agent Gamma] Rebalancing sweep check failed:`, error.message || error);
+        }
+    }
+
+    /**
+     * Monitors the vault's USDC balance. If it exceeds threshold, sweeps the excess
+     * to the first linked corporate bank account.
+     */
+    async monitorAndSweepToBank(thresholdUSDC: number = 1000) {
+        console.log(`[Agent Gamma - The Allocator] Checking treasury balances for bank sweep rule...`);
+        const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
+
+        try {
+            const [erc20Balance] = await vaultContract.getTreasuryBalances(ERC20_USDC_ADDRESS);
+            const usdcBalance = Number(ethers.formatUnits(erc20Balance, ERC20_USDC_DECIMALS));
+
+            console.log(`[Agent Gamma] Vault USDC Balance: ${usdcBalance} USDC. Sweep Threshold: ${thresholdUSDC} USDC.`);
+
+            if (usdcBalance > thresholdUSDC) {
+                const excess = usdcBalance - thresholdUSDC;
+                console.log(`[Agent Gamma] Balance exceeds threshold by ${excess} USDC. Fetching linked bank accounts...`);
+
+                const banks = await prisma.bankAccount.findMany({ where: { status: 'ACTIVE' } });
+                if (banks.length === 0) {
+                    console.warn(`[Agent Gamma] No active bank accounts linked. Cannot execute sweep.`);
+                    return;
+                }
+
+                const targetBank = banks[0];
+                console.log(`[Agent Gamma] Excess USDC swept to bank account: ${targetBank.bankName} (${targetBank.id}).`);
+
+                // Call bank integrator to initiate transfer
+                const payout = await BankIntegrator.initiateBankPayout(targetBank.id, excess, 'USD');
+
+                console.log(`[Agent Gamma] Successfully initiated sweep payout of ${excess} USDC to traditional bank. Wire Reference: ${payout.trackingRef}`);
+                return payout;
+            } else {
+                console.log(`[Agent Gamma] USDC balance within normal bounds. No sweep payout triggered.`);
+            }
+        } catch (error: any) {
+            console.error(`[Agent Gamma] Bank sweep rebalancing check failed:`, error.message || error);
         }
     }
 
