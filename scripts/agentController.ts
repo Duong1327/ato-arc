@@ -25,6 +25,7 @@ const provider = new ethers.JsonRpcProvider(ARC_TESTNET_RPC_URL);
 const VAULT_ABI = [
     "function getTreasuryBalances() external view returns (uint256 erc20Balance, uint256 nativeGasBalance)",
     "function agentDirectPayoutERC20(address recipient, uint256 amountERC20, uint256 nonce, bytes calldata signature) external returns (bool)",
+    "function agentDirectPayoutERC20(address recipient, uint256 amountERC20, uint256 nonce, address agent, bytes calldata signature) external returns (bool)",
     "function agentExecuteMilestonePayout(uint256 milestoneId, address recipient, uint256 amountERC20) external returns (bool)",
     "function isAddressBlocklisted(address target) external view returns (bool)",
     "function updateComplianceBlocklist(address target, bool isBlocklisted) external",
@@ -253,6 +254,7 @@ class AgentAllocator {
         let signature = "0x";
         let nonce = 0n;
         let txData: string;
+        let sigInfo: any;
 
         if (invoice.type === 'milestone') {
             if (invoice.milestoneId === undefined) {
@@ -265,18 +267,30 @@ class AgentAllocator {
             ]);
             console.log(`[Agent Gamma] Encoded payout function: agentExecuteMilestonePayout(${invoice.milestoneId}, ${invoice.recipientAddress}, ${amountERC20Units} units)`);
         } else {
-            const sigInfo = await this.getSignatureAndNonce(invoice.recipientAddress, amountERC20Units, VAULT_CONTRACT_ADDRESS);
+            sigInfo = await this.getSignatureAndNonce(invoice.recipientAddress, amountERC20Units, VAULT_CONTRACT_ADDRESS);
             signature = sigInfo.signature;
             nonce = sigInfo.nonce;
 
-            txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutERC20', [
-                invoice.recipientAddress,
-                amountERC20Units,
-                nonce,
-                signature
-            ]);
+            const isSmartContract = (await provider.getCode(sigInfo.agentAddress)) !== '0x';
+
+            if (isSmartContract) {
+                txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutERC20(address,uint256,uint256,address,bytes)', [
+                    invoice.recipientAddress,
+                    amountERC20Units,
+                    nonce,
+                    sigInfo.agentAddress,
+                    signature
+                ]);
+            } else {
+                txData = vaultContract.interface.encodeFunctionData('agentDirectPayoutERC20(address,uint256,uint256,bytes)', [
+                    invoice.recipientAddress,
+                    amountERC20Units,
+                    nonce,
+                    signature
+                ]);
+            }
             console.log(`[Agent Gamma] Generated Agent Cryptographic Signature for transaction approval:`);
-            console.log(`  - Signer Address: ${sigInfo.agentAddress}`);
+            console.log(`  - Signer Address: ${sigInfo.agentAddress} (${isSmartContract ? 'Smart Contract' : 'EOA'})`);
             console.log(`  - Nonce: ${nonce.toString()}`);
             console.log(`  - Signature: ${signature}`);
         }
@@ -284,15 +298,17 @@ class AgentAllocator {
         console.log(`[Agent Gamma] Submitting transaction payload to Circle Developer-Controlled Wallets on Arc Testnet (Chain ID 5042002)...`);
         
         try {
+            const isSmartContract = invoice.type !== 'milestone' && sigInfo && (await provider.getCode(sigInfo.agentAddress)) !== '0x';
+
             const response = await circleClient.createContractExecutionTransaction({
                 walletId: this.walletId,
                 contractAddress: VAULT_CONTRACT_ADDRESS,
                 abiFunctionSignature: invoice.type === 'milestone' 
                     ? 'agentExecuteMilestonePayout(uint256,address,uint256)' 
-                    : 'agentDirectPayoutERC20(address,uint256,uint256,bytes)',
+                    : (isSmartContract ? 'agentDirectPayoutERC20(address,uint256,uint256,address,bytes)' : 'agentDirectPayoutERC20(address,uint256,uint256,bytes)'),
                 abiParameters: invoice.type === 'milestone' 
                     ? [invoice.milestoneId!, invoice.recipientAddress, amountERC20Units.toString()] 
-                    : [invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), signature],
+                    : (isSmartContract ? [invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), sigInfo.agentAddress, signature] : [invoice.recipientAddress, amountERC20Units.toString(), nonce.toString(), signature]),
                 fee: {
                     type: 'level',
                     config: {
@@ -347,7 +363,7 @@ class AgentAllocator {
             throw new Error("AGENT_PRIVATE_KEY or PRIVATE_KEY must be set in .env for signing.");
         }
         const agentSigner = new ethers.Wallet(agentPrivateKey, provider);
-        const agentAddress = await agentSigner.getAddress();
+        const agentAddress = process.env.AGENT_SMART_CONTRACT_ADDRESS || await agentSigner.getAddress();
         const vaultContract = new ethers.Contract(vaultAddress, VAULT_ABI, provider);
         const nonce = await vaultContract.agentNonces(agentAddress);
         const network = await provider.getNetwork();

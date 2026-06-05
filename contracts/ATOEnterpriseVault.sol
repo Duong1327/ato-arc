@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "./interfaces/IComplianceOracle.sol";
 import "./interfaces/IERC8004Registry.sol";
+import "./interfaces/IERC1271.sol";
 import "./ERC8183Job.sol";
 
 /**
@@ -318,7 +319,7 @@ contract ATOEnterpriseVault {
 
     /**
      * @notice Executed by authorized AI Auditor/Allocator agents to pay standard invoices or payroll directly
-     * if the amount is within the `agentSingleTxLimitERC20`. Uses ERC-20 USDC.
+     * if the amount is within the `agentSingleTxLimitERC20`. Uses ERC-20 USDC. (EOA / Backwards compatible version)
      */
     function agentDirectPayoutERC20(
         address recipient, 
@@ -331,36 +332,91 @@ contract ATOEnterpriseVault {
         complianceCheck(recipient) 
         returns (bool) 
     {
-        if (amountERC20 > agentSingleTxLimitERC20) revert AgentLimitExceeded();
-        
-        // Compute the cryptographic message hash matching off-chain signing
         bytes32 messageHash = keccak256(abi.encodePacked(recipient, amountERC20, nonce, address(this), block.chainid));
         bytes32 ethSignedMessageHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
         address signer = recoverSigner(ethSignedMessageHash, signature);
         
-        // Verify recovered signer is a registered agent (or owner)
+        return _executeAgentDirectPayout(recipient, amountERC20, nonce, signer, signature, ethSignedMessageHash);
+    }
+
+    /**
+     * @notice Executed by agents or smart wallets to pay standard invoices directly using ERC-1271 or standard signatures.
+     */
+    function agentDirectPayoutERC20(
+        address recipient, 
+        uint256 amountERC20,
+        uint256 nonce,
+        address agent,
+        bytes calldata signature
+    ) 
+        external 
+        onlyAgentOrOwner 
+        complianceCheck(recipient) 
+        returns (bool) 
+    {
+        bytes32 messageHash = keccak256(abi.encodePacked(recipient, amountERC20, nonce, address(this), block.chainid));
+        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
+        
+        return _executeAgentDirectPayout(recipient, amountERC20, nonce, agent, signature, ethSignedMessageHash);
+    }
+
+    function _executeAgentDirectPayout(
+        address recipient,
+        uint256 amountERC20,
+        uint256 nonce,
+        address agent,
+        bytes calldata signature,
+        bytes32 ethSignedMessageHash
+    ) 
+        internal 
+        returns (bool) 
+    {
+        if (amountERC20 > agentSingleTxLimitERC20) revert AgentLimitExceeded();
+        if (agent == address(0)) revert InvalidSignature();
+
+        if (!verifySignature(agent, ethSignedMessageHash, signature)) revert InvalidSignature();
+
         bool verifiedAgent = false;
         if (agentRegistryAddress != address(0)) {
-            verifiedAgent = IERC8004Registry(agentRegistryAddress).isAgentRegistered(signer);
+            verifiedAgent = IERC8004Registry(agentRegistryAddress).isAgentRegistered(agent);
         } else {
-            verifiedAgent = isAgent[signer];
+            verifiedAgent = isAgent[agent];
         }
-        if (!verifiedAgent && !isOwner[signer]) revert InvalidSignature();
-        
-        // Nonce check to prevent replay attacks
-        if (nonce != agentNonces[signer]) revert InvalidSignature();
-        
-        // Increment nonce
-        agentNonces[signer]++;
-        
+        if (!verifiedAgent && !isOwner[agent]) revert InvalidSignature();
+
+        if (nonce != agentNonces[agent]) revert InvalidSignature();
+
+        agentNonces[agent]++;
+
         IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
         if (usdc.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
 
-        emit DirectTransferExecuted(signer, recipient, amountERC20);
-        
+        emit DirectTransferExecuted(agent, recipient, amountERC20);
+
         bool success = usdc.transfer(recipient, amountERC20);
         if (!success) revert ExecutionFailed();
         return true;
+    }
+
+    /**
+     * @notice Helper function to verify signatures for both EOAs and Smart Contract Wallets (ERC-1271).
+     */
+    function verifySignature(
+        address signer,
+        bytes32 ethSignedMessageHash,
+        bytes memory signature
+    ) public view returns (bool) {
+        if (signer == address(0)) return false;
+        
+        if (signer.code.length > 0) {
+            try IERC1271(signer).isValidSignature(ethSignedMessageHash, signature) returns (bytes4 magicValue) {
+                return magicValue == 0x1626ba7e;
+            } catch {
+                return false;
+            }
+        } else {
+            return recoverSigner(ethSignedMessageHash, signature) == signer;
+        }
     }
 
     /**
