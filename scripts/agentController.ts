@@ -523,6 +523,24 @@ class AgentAllocator {
         }
     }
 
+    async checkAndExecuteIndexRebalance() {
+        console.log(`[Agent Gamma - The Allocator] Checking index rebalancing opportunities...`);
+        try {
+            const { IndexManager } = require('./indexManager');
+            const result = await IndexManager.checkAndRebalanceIndex(5.0, 0.5);
+            if (result.rebalanced) {
+                console.log(`[Agent Gamma] SUCCESS: Portfolio Index rebalanced. Sold ${result.log.sellAmount} ${result.log.sellToken} for ${result.log.buyToken}.`);
+            } else {
+                console.log(`[Agent Gamma] Index rebalancing skipped: ${result.reason}`);
+            }
+            return result;
+        } catch (error: any) {
+            console.error(`[Agent Gamma] Index rebalancing check failed:`, error.message || error);
+            return { rebalanced: false, error: error.message };
+        }
+    }
+
+
     async executeAutonomousTreasuryPayment(invoice: InvoicePayload) {
         console.log(`[Agent Gamma - The Allocator] Structuring execution for Invoice ${invoice.id}...`);
 
@@ -859,6 +877,14 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
     } catch (yieldErr: any) {
         console.warn(`[ATO Orchestrator] Automated yield sweep check warning:`, yieldErr.message || yieldErr);
     }
+
+    // Run dynamic treasury index rebalancing check autonomously
+    try {
+        await allocator.checkAndExecuteIndexRebalance();
+    } catch (indexErr: any) {
+        console.warn(`[ATO Orchestrator] Automated index rebalance check warning:`, indexErr.message || indexErr);
+    }
+
 
     // Step 1: Cognitive Audit
     const auditResult = await auditor.auditAndReconcile(invoice);
