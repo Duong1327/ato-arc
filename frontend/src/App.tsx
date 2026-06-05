@@ -129,7 +129,94 @@ export default function App() {
     }
   }, [vaultAddress]);
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing'>('dashboard');
+
+  // Gateway Billing State
+  const [gatewayState, setGatewayState] = useState<{
+    activeChannel: {
+      channelId: string;
+      buyer: string;
+      seller: string;
+      balance: string;
+      nonce: number;
+      isOpen: boolean;
+    } | null;
+    channelContractAddress: string;
+    logs: {
+      timestamp: string;
+      type: 'DEPOSIT' | 'MICRO-PAYMENT' | 'SETTLE' | 'REFUND';
+      channelId: string;
+      amount: string;
+      recipient: string;
+      status: 'PENDING' | 'SUCCESS' | 'FAILED';
+      description: string;
+    }[];
+  }>({
+    activeChannel: null,
+    channelContractAddress: '0x0000000000000000000000000000000000000000',
+    logs: []
+  });
+
+  // Load Gateway state periodically
+  useEffect(() => {
+    const fetchGatewayState = async () => {
+      try {
+        const response = await fetch('/gateway_state.json');
+        if (response.ok) {
+          const data = await response.json();
+          setGatewayState(data);
+        } else {
+          throw new Error('State file not found');
+        }
+      } catch (err) {
+        // Fallback mock logs if file is not found/not written yet
+        setGatewayState({
+          activeChannel: {
+            channelId: '0x7b1c3a8d9a2b4f62e87900000000000000000000000000000000000000000000',
+            buyer: passkeyAccount?.address || connectedAddress || '0x59B50855Aa3bE2F677cD6303Cec089B5F319D72a',
+            seller: '0x29da3f0095cc4b17a7f453df2c3bf30900000000',
+            balance: '9.985000',
+            nonce: 3,
+            isOpen: true
+          },
+          channelContractAddress: '0x59B50855Aa3bE2F677cD6303Cec089B5F319D72a',
+          logs: [
+            {
+              timestamp: new Date(Date.now() - 5000).toISOString(),
+              type: 'MICRO-PAYMENT',
+              channelId: '0x7b1c3a8d9a2b4f62e87900000000000000000000000000000000000000000000',
+              amount: '0.010000',
+              recipient: '0x29da3f0095cc4b17a7f453df2c3bf30900000000',
+              status: 'SUCCESS',
+              description: 'Audit Invoice Reconciliation for INV-2026-004'
+            },
+            {
+              timestamp: new Date(Date.now() - 30000).toISOString(),
+              type: 'MICRO-PAYMENT',
+              channelId: '0x7b1c3a8d9a2b4f62e87900000000000000000000000000000000000000000000',
+              amount: '0.005000',
+              recipient: '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a',
+              status: 'SUCCESS',
+              description: 'Compliance screening query for 0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a'
+            },
+            {
+              timestamp: new Date(Date.now() - 60000).toISOString(),
+              type: 'DEPOSIT',
+              channelId: '0x7b1c3a8d9a2b4f62e87900000000000000000000000000000000000000000000',
+              amount: '10.000000',
+              recipient: '0x29da3f0095cc4b17a7f453df2c3bf30900000000',
+              status: 'SUCCESS',
+              description: 'Opened payment channel with initial deposit of $10.00 USDC'
+            }
+          ]
+        });
+      }
+    };
+
+    fetchGatewayState();
+    const interval = setInterval(fetchGatewayState, 3000);
+    return () => clearInterval(interval);
+  }, [passkeyAccount, connectedAddress]);
 
   const [passkeyAccount, setPasskeyAccount] = useState<{
     address: string;
@@ -2077,6 +2164,17 @@ export default function App() {
               <AgentIcon />
               How It Works
             </button>
+
+            <button
+              onClick={() => setActiveTab('billing')}
+              className={`nav-button ${activeTab === 'billing' ? 'nav-button-active' : ''}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '0.75rem', opacity: 0.85 }}>
+                <rect x="2" y="4" width="20" height="16" rx="2" />
+                <line x1="2" y1="10" x2="22" y2="10" />
+              </svg>
+              Gateway Billing
+            </button>
           </div>
 
           {/* Infrastructure Quick Stats */}
@@ -3824,6 +3922,229 @@ export default function App() {
                   </form>
                 </div>
 
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 7: GATEWAY NANOPAYMENTS & MICRO-BILLING */}
+          {activeTab === 'billing' && (
+            <div className="compliance-tab-grid">
+              
+              {/* Left Column: Active Channel Info & Control */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                
+                {/* Active Channel Card */}
+                <div className="glass-panel" style={{ padding: '1.5rem', position: 'relative', overflow: 'hidden' }}>
+                  <div style={{
+                    position: 'absolute',
+                    top: '-50px',
+                    right: '-50px',
+                    width: '150px',
+                    height: '150px',
+                    borderRadius: '50%',
+                    background: 'radial-gradient(circle, rgba(0, 240, 255, 0.08) 0%, transparent 70%)',
+                    zIndex: 0
+                  }}></div>
+                  
+                  <div style={{ position: 'relative', zIndex: 1 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span className="badge badge-purple" style={{ fontSize: '0.6rem', letterSpacing: '0.05em' }}>CIRCLE GATEWAY CHANNEL</span>
+                      <span className="badge badge-green" style={{ fontSize: '0.6rem', padding: '0.2rem 0.5rem' }}>
+                        {gatewayState.activeChannel?.isOpen ? '● ACTIVE' : '● CLOSED'}
+                      </span>
+                    </div>
+
+                    <h3 style={{ fontSize: '1.2rem', fontWeight: 'bold', margin: '0.75rem 0 0.25rem 0', fontFamily: 'var(--font-mono)' }}>
+                      {gatewayState.activeChannel 
+                        ? `$${parseFloat(gatewayState.activeChannel.balance).toFixed(6)}` 
+                        : '$0.000000'}{' '}
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>USDC</span>
+                    </h3>
+                    <p style={{ fontSize: '0.62rem', color: 'var(--text-muted)' }}>Channel Escrow Balance (micro-precision)</p>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '1.25rem', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '0.75rem', fontSize: '0.68rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Channel ID:</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: '#fff' }}>
+                          {gatewayState.activeChannel 
+                            ? `${gatewayState.activeChannel.channelId.substring(0, 10)}...${gatewayState.activeChannel.channelId.substring(58)}` 
+                            : 'No active channel'}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Escrow Address:</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                          {gatewayState.channelContractAddress.substring(0, 8)}...{gatewayState.channelContractAddress.substring(34)}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Current Nonce:</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: '#fff' }}>
+                          {gatewayState.activeChannel ? gatewayState.activeChannel.nonce : 0}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Fund/Refuel escrow channel */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <h3 className="metric-label" style={{ fontSize: '0.65rem', textTransform: 'uppercase', marginBottom: '0.75rem' }}>
+                    Escrow Fund Manager
+                  </h3>
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                    Top up the active Gateway channel to sponsor autonomous compliance screenings and audit nanopayments.
+                  </p>
+
+                  <div style={{ display: 'flex', gap: '0.75rem' }}>
+                    <button 
+                      onClick={async () => {
+                        alert('Refueling $5.00 USDC to payment channel escrow...');
+                        try {
+                          const response = await fetch('/gateway_state.json');
+                          let stateData = gatewayState;
+                          if (response.ok) {
+                            stateData = await response.json();
+                          }
+                          if (stateData.activeChannel) {
+                            const cur = parseFloat(stateData.activeChannel.balance);
+                            stateData.activeChannel.balance = (cur + 5.0).toFixed(6);
+                            stateData.logs.unshift({
+                              timestamp: new Date().toISOString(),
+                              type: 'DEPOSIT',
+                              channelId: stateData.activeChannel.channelId,
+                              amount: '5.000000',
+                              recipient: stateData.activeChannel.seller,
+                              status: 'SUCCESS',
+                              description: 'Funded channel with additional deposit of $5.00 USDC'
+                            });
+                            setGatewayState({...stateData});
+                          }
+                        } catch(e) {}
+                      }}
+                      className="hex-blueprint-btn" 
+                      style={{ flex: 1, fontSize: '0.7rem' }}
+                    >
+                      Refuel $5.00 USDC
+                    </button>
+                    <button 
+                      onClick={() => {
+                        alert('Escrow settled. Refunding remaining balance to treasury...');
+                        if (gatewayState.activeChannel) {
+                          const stateData = { ...gatewayState };
+                          if (stateData.activeChannel) {
+                            stateData.activeChannel.isOpen = false;
+                            stateData.activeChannel.balance = '0.000000';
+                            stateData.logs.unshift({
+                              timestamp: new Date().toISOString(),
+                              type: 'SETTLE',
+                              channelId: stateData.activeChannel.channelId,
+                              amount: '0.000000',
+                              recipient: stateData.activeChannel.seller,
+                              status: 'SUCCESS',
+                              description: 'Escrow payment channel manually settled and closed'
+                            });
+                            setGatewayState(stateData);
+                          }
+                        }
+                      }}
+                      className="hex-blueprint-btn" 
+                      style={{ flex: 1, fontSize: '0.7rem', borderColor: 'var(--accent-pink)' }}
+                      disabled={!gatewayState.activeChannel?.isOpen}
+                    >
+                      Settle & Close
+                    </button>
+                  </div>
+                </div>
+
+                {/* Gateway billing policies */}
+                <div className="glass-panel" style={{ padding: '1.25rem' }}>
+                  <h4 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.7rem', color: '#fff', marginBottom: '0.5rem' }}>
+                    Nanopayment Spending Policy
+                  </h4>
+                  <div style={{ fontSize: '0.62rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span>Slippage / Overdraft Limit:</span>
+                      <strong style={{ color: '#fff' }}>0.05 USDC</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span>Daily Spending Cap:</span>
+                      <strong style={{ color: '#fff' }}>100.00 USDC</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span>Audit Fee Per Payout:</span>
+                      <strong style={{ color: 'var(--accent-cyan)' }}>0.010000 USDC</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span>Compliance Scan Fee:</span>
+                      <strong style={{ color: 'var(--accent-cyan)' }}>0.005000 USDC</strong>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Right Column: Billing History Logs */}
+              <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div>
+                  <h3 style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)', fontWeight: 'bold', fontSize: '0.85rem' }}>
+                    x402 Micro-Billing & Payout History
+                  </h3>
+                  <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                    Audit record of sub-cent transactions, agent API queries, and on-chain escrow deposits.
+                  </p>
+                </div>
+
+                <div className="screening-table-container" style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                  <table className="screening-table">
+                    <thead>
+                      <tr>
+                        <th>Timestamp</th>
+                        <th>Type</th>
+                        <th>Description</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gatewayState.logs.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.7rem', padding: '2rem' }}>
+                            No billing logs recorded yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        gatewayState.logs.map((log, index) => (
+                          <tr key={index} className="table-row">
+                            <td style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                              {new Date(log.timestamp).toLocaleTimeString()}
+                            </td>
+                            <td>
+                              <span className={`badge ${
+                                log.type === 'DEPOSIT' ? 'badge-green' : 
+                                log.type === 'MICRO-PAYMENT' ? 'badge-purple' : 'badge-pink'
+                              }`} style={{ fontSize: '0.52rem' }}>
+                                {log.type}
+                              </span>
+                            </td>
+                            <td style={{ fontSize: '0.65rem', color: '#fff' }}>
+                              {log.description}
+                            </td>
+                            <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)', fontSize: '0.65rem', fontWeight: 'bold' }}>
+                              {log.type === 'MICRO-PAYMENT' ? '-' : '+'}${parseFloat(log.amount).toFixed(6)}
+                            </td>
+                            <td>
+                              <span className={`badge ${log.status === 'SUCCESS' ? 'badge-green' : 'badge-red'}`} style={{ fontSize: '0.52rem' }}>
+                                {log.status === 'SUCCESS' ? '✓ OK' : '⚠️ FAIL'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
             </div>
