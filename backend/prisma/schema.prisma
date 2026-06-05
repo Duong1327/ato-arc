@@ -147,3 +147,38 @@ model RebalanceLog {
   createdAt   DateTime @default(now())
 }
 
+model FeeBalance {
+  tokenAddress    String   @id
+  tokenSymbol     String
+  accumulatedFees Float    @default(0.0)
+  claimedFees     Float    @default(0.0)
+  updatedAt       DateTime @updatedAt
+}
+
+model FeePayout {
+  id           String   @id @default(uuid())
+  stakeholder  String
+  tokenAddress String
+  tokenSymbol  String
+  amount       Float
+  txHash       String
+  createdAt    DateTime @default(now())
+}
+
+model RemoteExecution {
+  id               String   @id @default(uuid())
+  sourceChain      String   // e.g. "Arc"
+  destChain        String   // e.g. "Base", "Arbitrum", "Ethereum"
+  targetAddress    String
+  payload          String   // hex-encoded call data
+  amountUSDC       Float    @default(0.0)
+  nonce            Int
+  status           String   // "PENDING", "EXECUTED", "FAILED"
+  txHash           String?  // On-chain source tx hash
+  destTxHash       String?  // On-chain destination execution tx hash
+  signature        String   // Cryptographic signature from registered agent
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+
