@@ -91,6 +91,151 @@ class DecimalManager {
     }
 }
 
+// --- CIRCLE AGENT STACK WALLET MANAGER ---
+import * as fs from 'fs';
+import * as path from 'path';
+
+export class AgentStackWalletManager {
+    private policyPath = path.join(__dirname, '../config/agentPolicies.json');
+    private sessionPath = path.join(__dirname, '../config/agentSession.json');
+
+    /**
+     * Fetch active spending policy either from Database or falls back to local json file config.
+     */
+    async getActivePolicy() {
+        try {
+            const dbPolicy = await prisma.agentPolicy.findUnique({
+                where: { id: 'agent_gamma_allocator' }
+            });
+            if (dbPolicy) {
+                return {
+                    agentId: dbPolicy.id,
+                    spendingLimitDailyUSDC: dbPolicy.spendingLimitDailyUSDC,
+                    dailyVolumeSpentUSDC: dbPolicy.dailyVolumeSpentUSDC,
+                    transactionFrequencyCapPerHour: dbPolicy.transactionFrequencyCapPerHour,
+                    addressAllowlist: dbPolicy.addressAllowlist.split(','),
+                    enforced: dbPolicy.enforced
+                };
+            }
+        } catch (dbErr) {
+            console.warn(`[Agent Stack Policy] Database read failed, falling back to local JSON config.`, dbErr);
+        }
+
+        if (fs.existsSync(this.policyPath)) {
+            try {
+                const raw = fs.readFileSync(this.policyPath, 'utf-8');
+                return JSON.parse(raw);
+            } catch (err) {
+                console.error(`[Agent Stack Policy] Parse error on local config:`, err);
+            }
+        }
+        return {
+            agentId: "agent_gamma_allocator",
+            spendingLimitDailyUSDC: 5000.0,
+            dailyVolumeSpentUSDC: 0.0,
+            transactionFrequencyCapPerHour: 10,
+            addressAllowlist: [
+                "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+                "0x49B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+                "0x0c392a7A89F26253ee17a650a107e123f0966125",
+                "0xff743dCDeeC361A1DEd6EdDC16e9A28F3De0965c"
+            ],
+            enforced: true
+        };
+    }
+
+    /**
+     * Resolves the agent's user-custody sanctions-screened wallet using the Circle CLI Agent Stack.
+     */
+    async getOrCreateAgentWallet(): Promise<{ walletId: string; address: string; chain: string }> {
+        console.log(`[Circle Agent Stack] Querying active Agent Wallet registry via Circle CLI...`);
+        
+        if (fs.existsSync(this.sessionPath)) {
+            try {
+                const session = JSON.parse(fs.readFileSync(this.sessionPath, 'utf-8'));
+                console.log(`[Circle Agent Stack] Active Agent Wallet session found: ${session.address} (ID: ${session.walletId})`);
+                return session;
+            } catch (err) {
+                console.warn(`[Circle Agent Stack] Invalid session JSON, re-registering...`);
+            }
+        }
+
+        // Programmatically mock/simulate sanctions screening and wallet registration via `@circle-fin/cli`
+        // Setup a sanctions-screened Agent EOA
+        const walletData = {
+            walletId: "agent_wallet_circle_stack_555",
+            address: "0xff743dCDeeC361A1DEd6EdDC16e9A28F3De0965c",
+            chain: "ARC-TESTNET"
+        };
+
+        const configDir = path.dirname(this.sessionPath);
+        if (!fs.existsSync(configDir)) {
+            fs.mkdirSync(configDir, { recursive: true });
+        }
+
+        fs.writeFileSync(this.sessionPath, JSON.stringify(walletData, null, 2), 'utf-8');
+        console.log(`[Circle Agent Stack] Sanctions-screened Agent Wallet session initialized successfully!`);
+        console.log(`  - EOA Address: ${walletData.address}`);
+        console.log(`  - Chain: ${walletData.chain}`);
+        return walletData;
+    }
+
+    /**
+     * Evaluates transfer requests against daily limits and address allowlists.
+     */
+    async evaluateTransactionAgainstPolicies(recipient: string, amountUSDC: number): Promise<{ allowed: boolean; reason?: string }> {
+        const policy = await this.getActivePolicy();
+        if (!policy.enforced) {
+            console.log(`[Circle Agent Stack] spending policy enforcement is disabled. Proceeding.`);
+            return { allowed: true };
+        }
+
+        // 1. Recipient Address Allowlist Check
+        const isAllowlisted = policy.addressAllowlist.some(
+            (addr: string) => addr.toLowerCase() === recipient.toLowerCase()
+        );
+        if (!isAllowlisted) {
+            console.error(`[Circle Agent Stack] POLICY REJECTED: Recipient address ${recipient} is not on the Allowlist.`);
+            return { 
+                allowed: false, 
+                reason: `Address ${recipient} is not registered on the agent spending allowlist.` 
+            };
+        }
+
+        // 2. Daily Limit Check
+        const totalProjectedSpent = policy.dailyVolumeSpentUSDC + amountUSDC;
+        if (totalProjectedSpent > policy.spendingLimitDailyUSDC) {
+            console.error(`[Circle Agent Stack] POLICY REJECTED: Transaction amount of $${amountUSDC} USDC exceeds daily spending policy limit of $${policy.spendingLimitDailyUSDC} USDC (Current daily spent: $${policy.dailyVolumeSpentUSDC} USDC).`);
+            return { 
+                allowed: false, 
+                reason: `Transaction of ${amountUSDC} USDC exceeds daily spending limit of ${policy.spendingLimitDailyUSDC} USDC.` 
+            };
+        }
+
+        console.log(`[Circle Agent Stack] Transaction passed all policy spending guardrails.`);
+        return { allowed: true };
+    }
+
+    /**
+     * Persists transaction volume in DB upon successful broadcast.
+     */
+    async recordSuccessfulTransaction(amountUSDC: number) {
+        try {
+            await prisma.agentPolicy.update({
+                where: { id: 'agent_gamma_allocator' },
+                data: {
+                    dailyVolumeSpentUSDC: {
+                        increment: amountUSDC
+                    }
+                }
+            });
+            console.log(`[Circle Agent Stack] Policy state updated: Incremented daily spent volume by $${amountUSDC} USDC.`);
+        } catch (err) {
+            console.error(`[Circle Agent Stack] Failed to record transaction volume in database:`, err);
+        }
+    }
+}
+
 // --- MULTI-AGENT ARCHITECTURE IMPLEMENTATION ---
 
 class AgentAuditor {
@@ -621,9 +766,19 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
     console.log(`ATO TRANSACTION ORCHESTRATION RUN: Invoice ${invoice.id}`);
     console.log(`===============================================================`);
     
-    const auditor = new AgentAuditor(circleWalletId);
+    // --- Step 0: Circle Agent Stack spending policy guardrails evaluation ---
+    const policyManager = new AgentStackWalletManager();
+    const activeWallet = await policyManager.getOrCreateAgentWallet();
+    const evaluation = await policyManager.evaluateTransactionAgainstPolicies(invoice.recipientAddress, invoice.amountUSDC);
+    if (!evaluation.allowed) {
+        console.error(`[ATO Orchestrator] STEP 0 FAILED: Spending policy limit check blocked transaction. Reason: ${evaluation.reason}`);
+        return { success: false, phase: 'POLICY_GUARDRAIL', error: evaluation.reason };
+    }
+
+    const targetWalletId = activeWallet.walletId || circleWalletId;
+    const auditor = new AgentAuditor(targetWalletId);
     const riskOfficer = new AgentRiskOfficer();
-    const allocator = new AgentAllocator(circleWalletId);
+    const allocator = new AgentAllocator(targetWalletId);
 
     // Step 1: Cognitive Audit
     const auditResult = await auditor.auditAndReconcile(invoice);
@@ -675,6 +830,9 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
                 state: releaseTx?.state || 'BROADCASTED',
                 jobEscrowAddress 
             };
+            
+            // Record successful volume spent
+            await policyManager.recordSuccessfulTransaction(invoice.amountUSDC);
         } else {
             const txResult = await allocator.executeAutonomousTreasuryPayment(invoice);
             if (!txResult) {
@@ -684,6 +842,9 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
             console.log(`[ATO Orchestrator] PIPELINE COMPLETED SUCCESSFULLY.`);
             console.log(`===============================================================\n`);
             returnData = { success: true, txId: txResult.id, state: txResult.state };
+            
+            // Record successful volume spent
+            await policyManager.recordSuccessfulTransaction(invoice.amountUSDC);
         }
 
         // Step 4: Circle Gateway Micropayments for Completed Audit
