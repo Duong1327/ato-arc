@@ -107,6 +107,11 @@ contract ATOEnterpriseVault {
     event FactoringFacilityUpdated(address indexed oldFacility, address indexed newFacility);
     event FactoringPurchaserRegistered(uint256 indexed milestoneId, address indexed purchaser);
 
+    // Revenue & Fee Allocation Engine variables
+    uint256 public feeBasisPoints; // Basis points of transfer fee (e.g. 50 = 0.5%)
+    mapping(address => uint256) public accumulatedFees; // accumulated fees per token (address(0) for native gas)
+    mapping(address => bool) public isStakeholder; // stakeholder addresses allowed to claim fees
+
 
     // --- EVENTS ---
     event AgentStatusUpdated(address indexed agent, bool indexed status);
@@ -130,6 +135,10 @@ contract ATOEnterpriseVault {
     event StableFXAddressUpdated(address indexed oldStableFX, address indexed newStableFX);
     event FxTradeExecuted(address indexed sellToken, address indexed buyToken, uint256 sellAmount, uint256 buyAmountBought, address indexed recipient);
     event TokenRegistered(address indexed tokenAddress);
+    event FeeBasisPointsUpdated(uint256 oldBps, uint256 newBps);
+    event StakeholderStatusUpdated(address indexed stakeholder, bool indexed status);
+    event FeeDeducted(address indexed token, uint256 amount);
+    event FeesClaimed(address indexed stakeholder, address indexed token, uint256 amount);
     
     // --- CUSTOM ERRORS ---
     error NotAnOwner();
@@ -148,6 +157,8 @@ contract ATOEnterpriseVault {
     error ExecutionFailed();
     error InvalidThreshold();
     error InvalidSignature();
+    error Unauthorized();
+    error InsufficientFees();
 
     // --- MODIFIERS ---
     modifier onlyOwner() {
@@ -337,6 +348,44 @@ contract ATOEnterpriseVault {
     function setStableFXAddress(address newStableFX) external onlyOwner {
         emit StableFXAddressUpdated(stableFXAddress, newStableFX);
         stableFXAddress = newStableFX;
+    }
+
+    /**
+     * @notice Allows owners to update the transfer fee in basis points (max 10% / 1000 bps).
+     */
+    function setFeeBasisPoints(uint256 newBps) external onlyOwner {
+        if (newBps > 1000) revert InvalidThreshold();
+        emit FeeBasisPointsUpdated(feeBasisPoints, newBps);
+        feeBasisPoints = newBps;
+    }
+
+    /**
+     * @notice Allows owners to register stakeholder addresses allowed to claim fees.
+     */
+    function setStakeholder(address stakeholder, bool status) external onlyOwner {
+        if (stakeholder == address(0)) revert InvalidAddress();
+        isStakeholder[stakeholder] = status;
+        emit StakeholderStatusUpdated(stakeholder, status);
+    }
+
+    /**
+     * @notice Allows registered stakeholders to withdraw accumulated fee balances.
+     */
+    function claimFees(address token, uint256 amount) external {
+        if (!isStakeholder[msg.sender]) revert Unauthorized();
+        if (accumulatedFees[token] < amount) revert InsufficientFees();
+        
+        accumulatedFees[token] -= amount;
+
+        if (token == address(0)) {
+            (bool success, ) = payable(msg.sender).call{value: amount}("");
+            if (!success) revert ExecutionFailed();
+        } else {
+            bool success = IERC20(token).transfer(msg.sender, amount);
+            if (!success) revert ExecutionFailed();
+        }
+        
+        emit FeesClaimed(msg.sender, token, amount);
     }
 
     /**
@@ -611,9 +660,14 @@ contract ATOEnterpriseVault {
         IERC20 erc20Token = IERC20(token);
         if (erc20Token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
 
-        emit DirectTransferExecuted(agent, recipient, amountERC20);
+        uint256 fee = (amountERC20 * feeBasisPoints) / 10000;
+        uint256 transferAmount = amountERC20 - fee;
+        accumulatedFees[token] += fee;
 
-        bool success = erc20Token.transfer(recipient, amountERC20);
+        emit FeeDeducted(token, fee);
+        emit DirectTransferExecuted(agent, recipient, transferAmount);
+
+        bool success = erc20Token.transfer(recipient, transferAmount);
         if (!success) revert ExecutionFailed();
         return true;
     }
@@ -679,19 +733,29 @@ contract ATOEnterpriseVault {
         if (milestone.jobContractAddress == address(0)) {
             IERC20 token = IERC20(milestone.token == address(0) ? ERC20_USDC_ADDRESS : milestone.token);
             if (token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
-            bool success = token.transfer(targetRecipient, amountERC20);
+
+            uint256 fee = (amountERC20 * feeBasisPoints) / 10000;
+            uint256 transferAmount = amountERC20 - fee;
+            accumulatedFees[address(token)] += fee;
+            emit FeeDeducted(address(token), fee);
+
+            bool success = token.transfer(targetRecipient, transferAmount);
             if (!success) revert ExecutionFailed();
         } else {
             if (milestonePurchaser[milestoneId] != address(0)) {
+                IERC20 token = IERC20(milestone.token == address(0) ? ERC20_USDC_ADDRESS : milestone.token);
+                uint256 fee = (amountERC20 * feeBasisPoints) / 10000;
+                uint256 transferAmount = amountERC20 - fee;
+                accumulatedFees[address(token)] += fee;
+                emit FeeDeducted(address(token), fee);
+
                 try ERC8183Job(milestone.jobContractAddress).claimRefund(1) {
-                    IERC20 token = IERC20(milestone.token == address(0) ? ERC20_USDC_ADDRESS : milestone.token);
                     if (token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
-                    bool success = token.transfer(targetRecipient, amountERC20);
+                    bool success = token.transfer(targetRecipient, transferAmount);
                     if (!success) revert ExecutionFailed();
                 } catch {
-                    IERC20 token = IERC20(milestone.token == address(0) ? ERC20_USDC_ADDRESS : milestone.token);
                     if (token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
-                    bool success = token.transfer(targetRecipient, amountERC20);
+                    bool success = token.transfer(targetRecipient, transferAmount);
                     if (!success) revert ExecutionFailed();
                 }
             }
@@ -767,14 +831,24 @@ contract ATOEnterpriseVault {
             uint256 nativeGasValue = convertToNativeGas(prop.amountERC20);
             if (address(this).balance < nativeGasValue) revert InsufficientVaultBalance();
 
-            (bool success, ) = payable(prop.recipient).call{value: nativeGasValue}(prop.data);
+            uint256 fee = (nativeGasValue * feeBasisPoints) / 10000;
+            uint256 transferAmount = nativeGasValue - fee;
+            accumulatedFees[address(0)] += fee;
+            emit FeeDeducted(address(0), fee);
+
+            (bool success, ) = payable(prop.recipient).call{value: transferAmount}(prop.data);
             if (!success) revert ExecutionFailed();
         } else {
             // Standard ERC-20 USDC token transaction (6 decimals)
             IERC20 usdc = IERC20(ERC20_USDC_ADDRESS);
             if (usdc.balanceOf(address(this)) < prop.amountERC20) revert InsufficientVaultBalance();
 
-            bool success = usdc.transfer(prop.recipient, prop.amountERC20);
+            uint256 fee = (prop.amountERC20 * feeBasisPoints) / 10000;
+            uint256 transferAmount = prop.amountERC20 - fee;
+            accumulatedFees[ERC20_USDC_ADDRESS] += fee;
+            emit FeeDeducted(ERC20_USDC_ADDRESS, fee);
+
+            bool success = usdc.transfer(prop.recipient, transferAmount);
             if (!success) revert ExecutionFailed();
         }
 
