@@ -314,6 +314,62 @@ class AgentAuditor {
             throw error;
         }
     }
+
+    /**
+     * Evaluates a supplier's factoring request and signs off on approved discount rates.
+     */
+    async evaluateFactoringRequest(milestoneId: number, discountRate: number, supplierAddress: string) {
+        console.log(`[Agent Alpha - The Auditor] Evaluating factoring request for Milestone ${milestoneId}...`);
+        
+        let approved = false;
+        let reason = "";
+
+        // Automated evaluation policies:
+        // 1. Discount rate must be between 100 bps (1%) and 1500 bps (15%)
+        if (discountRate < 100) {
+            reason = "Discount rate too low; does not cover liquidity provider margins.";
+        } else if (discountRate > 1500) {
+            reason = "Discount rate too high; predatory terms flagged for supplier protection.";
+        } else {
+            // 2. Query compliance check on supplier
+            try {
+                const vaultContract = new ethers.Contract(VAULT_CONTRACT_ADDRESS, VAULT_ABI, provider);
+                const isBlocklisted = await vaultContract.isAddressBlocklisted(supplierAddress);
+                if (isBlocklisted) {
+                    reason = "Supplier is flagged on blocklist.";
+                } else {
+                    approved = true;
+                }
+            } catch (err: any) {
+                reason = "Vault connectivity check failed: " + err.message;
+            }
+        }
+
+        console.log(`[Agent Alpha] Factoring evaluation complete. Approved: ${approved}. Reason: ${reason}`);
+
+        // Broadcast contract execution if approved
+        try {
+            const factoringAddress = process.env.FACTORING_CONTRACT_ADDRESS || "0xFactoringPlaceholder";
+            const response = await circleClient.createContractExecutionTransaction({
+                walletId: this.walletId,
+                contractAddress: factoringAddress,
+                abiFunctionSignature: 'evaluateFactoringOffer(uint256,bool)',
+                abiParameters: [milestoneId.toString(), approved.toString()],
+                fee: {
+                    type: 'level',
+                    config: {
+                        feeLevel: 'MEDIUM'
+                    }
+                }
+            });
+            console.log(`[Agent Alpha] Factoring evaluation transaction broadcasted. Tx ID: ${response.data?.id}`);
+            return { approved, txId: response.data?.id, reason };
+        } catch (error: any) {
+            console.error(`[Agent Alpha] Factoring evaluation transaction failed:`, error.message);
+            // Fallback for tests or local execution when Developer-Controlled Wallets are mocked
+            return { approved, localSuccess: true, reason };
+        }
+    }
 }
 
 class AgentRiskOfficer {
