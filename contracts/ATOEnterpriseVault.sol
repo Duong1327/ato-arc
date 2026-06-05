@@ -96,6 +96,12 @@ contract ATOEnterpriseVault {
     address[] public registeredTokens;
     mapping(address => bool) public isTokenRegistered;
 
+    // Factoring Facility variables
+    address public factoringFacilityAddress;
+    mapping(uint256 => address) public milestonePurchaser;
+    event FactoringFacilityUpdated(address indexed oldFacility, address indexed newFacility);
+    event FactoringPurchaserRegistered(uint256 indexed milestoneId, address indexed purchaser);
+
     // --- EVENTS ---
     event AgentStatusUpdated(address indexed agent, bool indexed status);
     event OwnerStatusUpdated(address indexed owner, bool indexed status);
@@ -409,6 +415,28 @@ contract ATOEnterpriseVault {
         emit MilestoneStatusChanged(milestoneId, isActive);
     }
 
+    /**
+     * @notice Updates the registered factoring facility contract address.
+     */
+    function setFactoringFacility(address _factoringFacility) external onlyOwner {
+        if (_factoringFacility == address(0)) revert InvalidAddress();
+        address oldFacility = factoringFacilityAddress;
+        factoringFacilityAddress = _factoringFacility;
+        emit FactoringFacilityUpdated(oldFacility, _factoringFacility);
+    }
+
+    /**
+     * @notice Registers a purchaser who bought a supplier's milestone claim.
+     */
+    function registerFactoringPurchaser(uint256 milestoneId, address purchaser) external {
+        if (msg.sender != factoringFacilityAddress) revert NotAnAgentOrOwner();
+        if (!milestones[milestoneId].exists) revert ProposalDoesNotExist();
+        if (purchaser == address(0)) revert InvalidAddress();
+
+        milestonePurchaser[milestoneId] = purchaser;
+        emit FactoringPurchaserRegistered(milestoneId, purchaser);
+    }
+
     // --- AUTONOMOUS AGENT ACTIONS (OPERATIONAL LAYERS) ---
 
     /**
@@ -594,7 +622,18 @@ contract ATOEnterpriseVault {
         if (milestone.spentERC20 + amountERC20 > milestone.allocatedERC20) revert InsufficientMilestoneFunds();
 
         milestone.spentERC20 += amountERC20;
-        emit MilestoneSpent(milestoneId, recipient, amountERC20);
+
+        address targetRecipient = recipient;
+        if (milestonePurchaser[milestoneId] != address(0)) {
+            targetRecipient = milestonePurchaser[milestoneId];
+            if (complianceOracleAddress != address(0)) {
+                if (!IComplianceOracle(complianceOracleAddress).isAddressCompliant(targetRecipient)) {
+                    revert AddressIsBlocklisted();
+                }
+            }
+        }
+
+        emit MilestoneSpent(milestoneId, targetRecipient, amountERC20);
 
         // If this milestone is backed by a deployed ERC-8183 escrow contract, the off-chain auditor 
         // agent will trigger the releaseFunds / complete function directly on the job contract.
@@ -602,8 +641,22 @@ contract ATOEnterpriseVault {
         if (milestone.jobContractAddress == address(0)) {
             IERC20 token = IERC20(milestone.token == address(0) ? ERC20_USDC_ADDRESS : milestone.token);
             if (token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
-            bool success = token.transfer(recipient, amountERC20);
+            bool success = token.transfer(targetRecipient, amountERC20);
             if (!success) revert ExecutionFailed();
+        } else {
+            if (milestonePurchaser[milestoneId] != address(0)) {
+                try ERC8183Job(milestone.jobContractAddress).claimRefund(1) {
+                    IERC20 token = IERC20(milestone.token == address(0) ? ERC20_USDC_ADDRESS : milestone.token);
+                    if (token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
+                    bool success = token.transfer(targetRecipient, amountERC20);
+                    if (!success) revert ExecutionFailed();
+                } catch {
+                    IERC20 token = IERC20(milestone.token == address(0) ? ERC20_USDC_ADDRESS : milestone.token);
+                    if (token.balanceOf(address(this)) < amountERC20) revert InsufficientVaultBalance();
+                    bool success = token.transfer(targetRecipient, amountERC20);
+                    if (!success) revert ExecutionFailed();
+                }
+            }
         }
 
         return true;
