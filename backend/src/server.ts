@@ -370,6 +370,160 @@ app.post('/api/paymaster/sponsor', async (req: Request, res: Response) => {
   }
 });
 
+// --- Agent Stack & Spending Policy Guardrails ---
+let pendingPolicyProposal: {
+  spendingLimitDailyUSDC: number;
+  transactionFrequencyCapPerHour: number;
+  addressAllowlist: string;
+  approvals: string[]; // List of approving EOAs or usernames
+} | null = null;
+
+// Initialize the database with a default policy if it doesn't exist
+async function ensureDefaultPolicy() {
+  try {
+    const existing = await prisma.agentPolicy.findUnique({
+      where: { id: 'agent_gamma_allocator' }
+    });
+    if (!existing) {
+      const fs = require('fs');
+      const path = require('path');
+      const policyPath = path.join(__dirname, '../../config/agentPolicies.json');
+      let defaults = {
+        spendingLimitDailyUSDC: 5000.0,
+        transactionFrequencyCapPerHour: 10,
+        addressAllowlist: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a,0x49B50855Aa3bE2F677cD6303Cec089B5F319D72a,0x0c392a7A89F26253ee17a650a107e123f0966125,0xff743dCDeeC361A1DEd6EdDC16e9A28F3De0965c",
+        enforced: true
+      };
+      if (fs.existsSync(policyPath)) {
+        const fileContent = JSON.parse(fs.readFileSync(policyPath, 'utf-8'));
+        defaults = {
+          spendingLimitDailyUSDC: fileContent.spendingLimitDailyUSDC,
+          transactionFrequencyCapPerHour: fileContent.transactionFrequencyCapPerHour,
+          addressAllowlist: fileContent.addressAllowlist.join(','),
+          enforced: fileContent.enforced
+        };
+      }
+      await prisma.agentPolicy.create({
+        data: {
+          id: 'agent_gamma_allocator',
+          spendingLimitDailyUSDC: defaults.spendingLimitDailyUSDC,
+          dailyVolumeSpentUSDC: 0.0,
+          transactionFrequencyCapPerHour: defaults.transactionFrequencyCapPerHour,
+          addressAllowlist: defaults.addressAllowlist,
+          enforced: defaults.enforced
+        }
+      });
+      console.log(`[Agent Policy] Database successfully seeded with defaults.`);
+    }
+  } catch (err) {
+    console.error(`[Agent Policy] Seeding failed:`, err);
+  }
+}
+
+// Ensure default policy is loaded
+ensureDefaultPolicy();
+
+app.get('/api/agent/policy', async (req: Request, res: Response) => {
+  try {
+    await ensureDefaultPolicy();
+    const policy = await prisma.agentPolicy.findUnique({
+      where: { id: 'agent_gamma_allocator' }
+    });
+    res.json(policy);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/agent/policy/proposal', (req: Request, res: Response) => {
+  res.json(pendingPolicyProposal);
+});
+
+app.post('/api/agent/policy/proposal', (req: Request, res: Response) => {
+  const { spendingLimitDailyUSDC, transactionFrequencyCapPerHour, addressAllowlist, creator } = req.body;
+  if (spendingLimitDailyUSDC === undefined || transactionFrequencyCapPerHour === undefined || !addressAllowlist) {
+    return res.status(400).json({ error: 'Missing required spending policy fields' });
+  }
+  
+  pendingPolicyProposal = {
+    spendingLimitDailyUSDC: parseFloat(spendingLimitDailyUSDC),
+    transactionFrequencyCapPerHour: parseInt(transactionFrequencyCapPerHour),
+    addressAllowlist,
+    approvals: [creator || 'Owner 1']
+  };
+
+  res.json({
+    success: true,
+    message: 'Policy update proposed. Requires multi-sig approval.',
+    proposal: pendingPolicyProposal
+  });
+});
+
+app.post('/api/agent/policy/proposal/approve', async (req: Request, res: Response) => {
+  const { approver } = req.body;
+  if (!pendingPolicyProposal) {
+    return res.status(400).json({ error: 'No pending policy update proposal exists.' });
+  }
+
+  const activeApprover = approver || 'Owner 2';
+  if (pendingPolicyProposal.approvals.includes(activeApprover)) {
+    return res.status(400).json({ error: 'Approver has already signed off on this proposal.' });
+  }
+
+  pendingPolicyProposal.approvals.push(activeApprover);
+
+  // If 2 or more approvals, apply the proposal
+  if (pendingPolicyProposal.approvals.length >= 2) {
+    try {
+      const updated = await prisma.agentPolicy.update({
+        where: { id: 'agent_gamma_allocator' },
+        data: {
+          spendingLimitDailyUSDC: pendingPolicyProposal.spendingLimitDailyUSDC,
+          transactionFrequencyCapPerHour: pendingPolicyProposal.transactionFrequencyCapPerHour,
+          addressAllowlist: pendingPolicyProposal.addressAllowlist
+        }
+      });
+
+      // Clear the proposal
+      pendingPolicyProposal = null;
+
+      return res.json({
+        success: true,
+        applied: true,
+        message: 'Policy approved by multi-sig team and successfully applied to Agent Allocator.',
+        policy: updated
+      });
+    } catch (error: any) {
+      return res.status(500).json({ error: error.message });
+    }
+  }
+
+  res.json({
+    success: true,
+    applied: false,
+    message: `Proposal approved by ${activeApprover}. Current sign-offs: ${pendingPolicyProposal.approvals.length}/2`,
+    proposal: pendingPolicyProposal
+  });
+});
+
+app.post('/api/agent/policy/toggle-enforcement', async (req: Request, res: Response) => {
+  try {
+    const current = await prisma.agentPolicy.findUnique({
+      where: { id: 'agent_gamma_allocator' }
+    });
+    if (!current) {
+      return res.status(404).json({ error: 'Agent policy not found' });
+    }
+    const updated = await prisma.agentPolicy.update({
+      where: { id: 'agent_gamma_allocator' },
+      data: { enforced: !current.enforced }
+    });
+    res.json(updated);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Start server if not running tests
 let server: any;
 if (process.env.NODE_ENV !== 'test') {
