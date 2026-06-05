@@ -2,6 +2,8 @@ import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-
 import { ethers } from 'ethers';
 import * as dotenv from 'dotenv';
 import crypto from 'crypto';
+import { GatewayBillingManager } from './gatewayBilling';
+import { CircleGatewaySDK } from '@circle-fin/gateway';
 
 // Load environment variables for local secrets management
 dotenv.config();
@@ -204,6 +206,43 @@ class AgentRiskOfficer {
             // 2. Query Circle's Compliance Endpoints to verify real-time status of the wallet
             console.log(`[Agent Beta] Querying Circle Compliance risk scoring service...`);
             
+            // Simulate x402 HTTP 402 challenge flow
+            console.log(`[Agent Beta] [x402] Initializing API call to premium compliance screening service...`);
+            
+            // Step A: Service returns 402 Payment Required challenge
+            const mockSellerAddress = '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a'; // compliance service owner
+            const mockServiceId = 'circle.compliance.screening';
+            const costUSD = 0.005; // 0.005 USDC per query
+            
+            console.log(`[Agent Beta] [x402] Received HTTP 402 Payment Required. challenge info:`);
+            console.log(`  - Service ID: ${mockServiceId}`);
+            console.log(`  - Cost: $${costUSD} USDC`);
+            console.log(`  - Merchant: ${mockSellerAddress}`);
+            
+            // Step B: Resolve the challenge using Gateway billing channel
+            const billingManager = new GatewayBillingManager(
+                process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY || ethers.Wallet.createRandom().privateKey,
+                process.env.GATEWAY_CONTRACT_ADDRESS || '0x59B50855Aa3bE2F677cD6303Cec089B5F319D72a'
+            );
+            
+            // Open/fund channel if not existing
+            const channel = await billingManager.getOrOpenChannel(mockSellerAddress, 5.00); // $5.00 initial deposit
+            console.log(`[Agent Beta] [x402] Active Gateway payment channel balance: $${channel.balance} USDC`);
+            
+            // Generate off-chain payment signature
+            const proof = await billingManager.processAgentPayment(costUSD, `Compliance screening query for ${recipientAddress}`);
+            
+            console.log(`[Agent Beta] [x402] Attaching payment proof signature in headers: ${proof.signature.substring(0, 20)}...`);
+            
+            // Step C: Verify payment proof on compliance server side (Simulation of receipt validation)
+            const isPaymentValid = billingManager.verifyPayment(proof, costUSD, channel.buyer, mockSellerAddress);
+            if (!isPaymentValid) {
+                console.error(`[Agent Beta - Risk Alert] Compliance API rejected payment proof signature!`);
+                return false;
+            }
+            
+            console.log(`[Agent Beta] [x402] Payment accepted! Proceeding with screening checks...`);
+            
             let isCompliantByCircle = true;
             let screeningResult = "APPROVED";
 
@@ -213,7 +252,9 @@ class AgentRiskOfficer {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${CIRCLE_API_KEY}`
+                        'Authorization': `Bearer ${CIRCLE_API_KEY}`,
+                        'X-Payment-Signature': proof.signature,
+                        'X-Payment-Channel': proof.channelId
                     },
                     body: JSON.stringify({
                         idempotencyKey,
@@ -556,6 +597,7 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
 
     // Step 3: Secure Asset Allocation & L1 Escrow / Dispatch
     try {
+        let returnData;
         if (invoice.type === 'milestone') {
             if (invoice.milestoneId === undefined) {
                 return { success: false, phase: 'ALLOCATOR', error: 'milestoneId is required for milestone invoices' };
@@ -583,7 +625,7 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
             console.log(`===============================================================`);
             console.log(`[ATO Orchestrator] PIPELINE ESCROW COMPLETED SUCCESSFULLY.`);
             console.log(`===============================================================\n`);
-            return { 
+            returnData = { 
                 success: true, 
                 txId: releaseTx?.id || submitTx?.id, 
                 state: releaseTx?.state || 'BROADCASTED',
@@ -597,8 +639,29 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
             console.log(`===============================================================`);
             console.log(`[ATO Orchestrator] PIPELINE COMPLETED SUCCESSFULLY.`);
             console.log(`===============================================================\n`);
-            return { success: true, txId: txResult.id, state: txResult.state };
+            returnData = { success: true, txId: txResult.id, state: txResult.state };
         }
+
+        // Step 4: Circle Gateway Micropayments for Completed Audit
+        try {
+            console.log(`[ATO Orchestrator] STEP 4: Initiating Gateway nanopayment for completed audit service...`);
+            const billingManager = new GatewayBillingManager(
+                process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY || ethers.Wallet.createRandom().privateKey,
+                process.env.GATEWAY_CONTRACT_ADDRESS || '0x59B50855Aa3bE2F677cD6303Cec089B5F319D72a'
+            );
+            // Ensure channel is open with the auditor agent
+            const auditorAddress = '0x29da3f0095cc4b17a7f453df2c3bf30900000000'; // Auditor agent wallet address
+            await billingManager.getOrOpenChannel(auditorAddress, 10.00); // 10 USDC initial deposit
+            
+            // Audit micro-fee: 0.01 USDC
+            const auditFee = 0.01;
+            const proof = await billingManager.processAgentPayment(auditFee, `Audit Invoice Reconciliation for ${invoice.id}`);
+            console.log(`[ATO Orchestrator] Micro-payout signature generated for Auditor agent: ${proof.signature.substring(0, 20)}...`);
+        } catch (gatewayErr: any) {
+            console.warn(`[ATO Orchestrator] Gateway micro-billing warning: ${gatewayErr.message}`);
+        }
+
+        return returnData;
     } catch (e: any) {
         return { success: false, phase: 'ALLOCATOR', error: e.message };
     }
