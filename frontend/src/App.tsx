@@ -49,7 +49,7 @@ interface InvoiceForm {
 
 interface LogEntry {
   timestamp: string;
-  agent: 'SYSTEM' | 'AUDITOR' | 'RISK_OFFICER' | 'ALLOCATOR' | 'POLICY';
+  agent: 'SYSTEM' | 'AUDITOR' | 'RISK_OFFICER' | 'ALLOCATOR' | 'POLICY' | 'SWEEPER';
   message: string;
   level: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR';
 }
@@ -129,7 +129,7 @@ export default function App() {
     }
   }, [vaultAddress]);
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing' | 'webhooks' | 'banking' | 'guardrails'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing' | 'webhooks' | 'banking' | 'guardrails' | 'index'>('dashboard');
 
   const [passkeyAccount, setPasskeyAccount] = useState<{
     address: string;
@@ -317,6 +317,111 @@ export default function App() {
   const [yieldSlippageLimitInput, setYieldSlippageLimitInput] = useState<string>('0.5');
   const [yieldLoading, setYieldLoading] = useState<boolean>(false);
   const [yieldApproverName, setYieldApproverName] = useState<string>('Owner 2');
+
+  // Multi-Token Treasury Index State
+  const [allocations, setAllocations] = useState<{
+    tokenAddress: string;
+    tokenSymbol: string;
+    targetWeight: number;
+    currentWeight: number;
+    balance: number;
+  }[]>([]);
+  const [targetUSDC, setTargetUSDC] = useState<string>('60');
+  const [targetEURC, setTargetEURC] = useState<string>('40');
+  const [pendingIndexProposal, setPendingIndexProposal] = useState<any>(null);
+  const [rebalanceHistory, setRebalanceHistory] = useState<any[]>([]);
+  const [allocationsError, setAllocationsError] = useState<string>('');
+
+  const fetchIndexData = async () => {
+    try {
+      const resAlloc = await fetch('http://localhost:3001/api/index/allocations');
+      if (resAlloc.ok) {
+        const data = await resAlloc.json();
+        setAllocations(data);
+      }
+      
+      const resProposal = await fetch('http://localhost:3001/api/index/proposal');
+      if (resProposal.ok) {
+        const data = await resProposal.json();
+        setPendingIndexProposal(data);
+      }
+
+      const resHistory = await fetch('http://localhost:3001/api/index/history');
+      if (resHistory.ok) {
+        const data = await resHistory.json();
+        setRebalanceHistory(data);
+      }
+    } catch (err: any) {
+      setAllocationsError(err.message || 'Error fetching index data');
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'index') {
+      fetchIndexData();
+      const interval = setInterval(fetchIndexData, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab]);
+
+  const submitTargetWeights = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('http://localhost:3001/api/index/proposal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          allocations: [
+            { tokenAddress: '0x3600000000000000000000000000000000000000', targetWeight: parseFloat(targetUSDC) },
+            { tokenAddress: '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a', targetWeight: parseFloat(targetEURC) }
+          ],
+          creator: 'Owner 1'
+        })
+      });
+      if (res.ok) {
+        fetchIndexData();
+      }
+    } catch (err: any) {
+      console.error('Propose target weights failed:', err);
+    }
+  };
+
+  const approveIndexProposal = async (approver: string) => {
+    try {
+      const res = await fetch('http://localhost:3001/api/index/proposal/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approver })
+      });
+      if (res.ok) {
+        fetchIndexData();
+      }
+    } catch (err: any) {
+      console.error('Approve index proposal failed:', err);
+    }
+  };
+
+  const triggerAutoRebalance = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/index/rebalance', { method: 'POST' });
+      if (res.ok) {
+        fetchIndexData();
+      }
+    } catch (err: any) {
+      console.error('Rebalance trigger failed:', err);
+    }
+  };
+
+  const simulateIndexDrift = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/index/simulate-drift', { method: 'POST' });
+      if (res.ok) {
+        fetchIndexData();
+      }
+    } catch (err: any) {
+      console.error('Simulate drift failed:', err);
+    }
+  };
 
   const fetchYieldConfig = async () => {
     try {
@@ -1221,7 +1326,7 @@ export default function App() {
   const { writeContractAsync: writeContract } = useWriteContract();
 
   // Helpers
-  const addLog = (agent: 'SYSTEM' | 'AUDITOR' | 'RISK_OFFICER' | 'ALLOCATOR' | 'POLICY', message: string, level: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR') => {
+  const addLog = (agent: 'SYSTEM' | 'AUDITOR' | 'RISK_OFFICER' | 'ALLOCATOR' | 'POLICY' | 'SWEEPER', message: string, level: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR') => {
     const now = new Date();
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
     setLogs(prev => [...prev, { timestamp: timeStr, agent, message, level }]);
@@ -2883,6 +2988,18 @@ export default function App() {
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
               </svg>
               Agent Guardrails
+            </button>
+
+            <button
+              onClick={() => setActiveTab('index')}
+              className={`nav-button ${activeTab === 'index' ? 'nav-button-active' : ''}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '0.75rem', opacity: 0.85 }}>
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 2v20" />
+                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+              </svg>
+              Treasury Index
             </button>
           </div>
 
@@ -6253,6 +6370,244 @@ export default function App() {
                   </div>
                 </div>
 
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 11: MULTI-TOKEN TREASURY INDEX MANAGER */}
+          {activeTab === 'index' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              
+              {/* Header card with Portfolio Status */}
+              <div className="glass-panel" style={{ padding: '1.5rem', position: 'relative', overflow: 'hidden' }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '-40px',
+                  right: '-40px',
+                  width: '160px',
+                  height: '160px',
+                  borderRadius: '50%',
+                  background: 'radial-gradient(circle, rgba(0, 240, 255, 0.08) 0%, transparent 70%)',
+                  zIndex: 0
+                }}></div>
+                <div style={{ position: 'relative', zIndex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                  <div>
+                    <h2 style={{ fontSize: '1.2rem', fontWeight: 'bold', color: '#fff' }}>Multi-Token Treasury Index Manager</h2>
+                    <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                      Diversify corporate reserves across a custom index of stablecoins on Arc. Monitor allocations, propose weight adjustments, and review autonomous rebalancing trades.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem' }}>
+                    <button 
+                      onClick={simulateIndexDrift} 
+                      className="action-button-secondary"
+                      style={{ fontSize: '0.68rem', padding: '0.5rem 1rem' }}
+                    >
+                      ⚡ Simulate Drift Imbalance
+                    </button>
+                    <button 
+                      onClick={triggerAutoRebalance} 
+                      className="action-button-primary"
+                      style={{ fontSize: '0.68rem', padding: '0.5rem 1rem' }}
+                    >
+                      🔄 Trigger Auto-Rebalance
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+                {/* Current Allocations Table */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', marginBottom: '1rem', letterSpacing: '0.05em' }}>
+                    CURRENT INDEX ALLOCATIONS
+                  </h3>
+                  {allocationsError && <p style={{ color: 'var(--accent-red)', fontSize: '0.75rem' }}>{allocationsError}</p>}
+                  
+                  <div className="table-container" style={{ maxHeight: '380px', overflowY: 'auto' }}>
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Asset</th>
+                          <th>Balance</th>
+                          <th>Current Weight</th>
+                          <th>Target Weight</th>
+                          <th>Drift</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {allocations.map((alloc) => {
+                          const drift = alloc.currentWeight - alloc.targetWeight;
+                          const isBreached = Math.abs(drift) >= 5.0;
+                          return (
+                            <tr key={alloc.tokenAddress}>
+                              <td style={{ display: 'flex', flexDirection: 'column' }}>
+                                <span style={{ fontWeight: 'bold', color: '#fff' }}>{alloc.tokenSymbol}</span>
+                                <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                                  {alloc.tokenAddress.substring(0, 6)}...{alloc.tokenAddress.substring(38)}
+                                </span>
+                              </td>
+                              <td>{alloc.balance.toLocaleString()} {alloc.tokenSymbol}</td>
+                              <td>{alloc.currentWeight.toFixed(2)}%</td>
+                              <td>{alloc.targetWeight.toFixed(2)}%</td>
+                              <td>
+                                <span className={`status-badge ${isBreached ? 'status-badge-failed' : 'status-badge-success'}`}>
+                                  {drift > 0 ? `+${drift.toFixed(2)}%` : `${drift.toFixed(2)}%`}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {allocations.length === 0 && (
+                          <tr>
+                            <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                              No index token balances found. Reconciling...
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Adjust Weights Form */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', marginBottom: '1rem', letterSpacing: '0.05em' }}>
+                    PROPOSE TARGET ALLOCATIONS
+                  </h3>
+
+                  {pendingIndexProposal ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', background: 'rgba(0, 240, 255, 0.05)', border: '1px solid rgba(0, 240, 255, 0.2)', padding: '1rem', borderRadius: '4px' }}>
+                      <div>
+                        <h4 style={{ fontSize: '0.75rem', fontWeight: 'bold', color: '#fff' }}>PENDING PROPOSAL</h4>
+                        <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>Requires multi-sig approvals to execute on-chain weight adjustments.</p>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        {pendingIndexProposal.allocations.map((a: any) => (
+                          <div key={a.tokenAddress} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem' }}>
+                            <span style={{ color: 'var(--text-secondary)' }}>
+                              {a.tokenAddress === '0x3600000000000000000000000000000000000000' ? 'USDC' : 'EURC'}:
+                            </span>
+                            <span style={{ fontWeight: 'bold', color: '#fff' }}>{a.targetWeight}%</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                        Signatures: {pendingIndexProposal.approvals.join(', ')}
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button
+                          onClick={() => approveIndexProposal('Owner 2')}
+                          className="action-button-primary"
+                          style={{ flex: 1, fontSize: '0.65rem', padding: '0.4rem 0.8rem' }}
+                        >
+                          ✍ Sign off as Owner 2
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <form onSubmit={submitTargetWeights} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>USDC Target Allocation (%)</label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          value={targetUSDC}
+                          onChange={(e) => setTargetUSDC(e.target.value)}
+                          min="0"
+                          max="100"
+                          step="1"
+                          required
+                        />
+                      </div>
+                      
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>EURC Target Allocation (%)</label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          value={targetEURC}
+                          onChange={(e) => setTargetEURC(e.target.value)}
+                          min="0"
+                          max="100"
+                          step="1"
+                          required
+                        />
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
+                        <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                          Total: <strong style={{ color: Number(targetUSDC) + Number(targetEURC) === 100 ? 'var(--accent-cyan)' : 'var(--accent-red)' }}>{Number(targetUSDC) + Number(targetEURC)}%</strong> (Must be 100%)
+                        </span>
+                        <button
+                          type="submit"
+                          disabled={Number(targetUSDC) + Number(targetEURC) !== 100}
+                          className="action-button-primary"
+                          style={{ fontSize: '0.7rem', padding: '0.5rem 1.2rem' }}
+                        >
+                          Propose Index Settings
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
+              </div>
+
+              {/* Rebalancing History Logs */}
+              <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', marginBottom: '1rem', letterSpacing: '0.05em' }}>
+                  REBALANCING ACTIVITY LOGS
+                </h3>
+                
+                <div className="table-container" style={{ maxHeight: '350px', overflowY: 'auto' }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Swap Executed</th>
+                        <th>Tx Hash</th>
+                        <th>Status</th>
+                        <th>Details</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rebalanceHistory.map((log) => (
+                        <tr key={log.id}>
+                          <td>{new Date(log.createdAt).toLocaleString()}</td>
+                          <td style={{ fontWeight: 'bold', color: '#fff' }}>
+                            Sold {log.sellAmount} {log.sellToken} ➜ Bought {log.buyAmount} {log.buyToken}
+                          </td>
+                          <td>
+                            <a 
+                              href={`https://testnet.arcscan.app/tx/${log.txHash}`} 
+                              target="_blank" 
+                              rel="noreferrer" 
+                              style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}
+                            >
+                              {log.txHash.substring(0, 10)}...
+                            </a>
+                          </td>
+                          <td>
+                            <span className="status-badge status-badge-success">
+                              {log.status}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                            {log.details}
+                          </td>
+                        </tr>
+                      ))}
+                      {rebalanceHistory.length === 0 && (
+                        <tr>
+                          <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '1.5rem' }}>
+                            No rebalancing swaps recorded yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
             </div>
