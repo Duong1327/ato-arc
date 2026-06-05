@@ -450,6 +450,23 @@ class AgentAllocator {
         this.walletId = walletId;
     }
 
+    async checkAndExecuteYieldSweep() {
+        console.log(`[Agent Gamma - The Allocator] Checking cross-chain yield opportunities for idle treasury reserves...`);
+        try {
+            const { YieldSweeper } = require('./yieldSweeper');
+            const result = await YieldSweeper.checkAndSweep();
+            if (result.swept) {
+                console.log(`[Agent Gamma] SUCCESS: Yield sweep executed. Bridged ${result.bridgeLog.amountUSDC} USDC from ${result.bridgeLog.sourceChain} to Arc.`);
+            } else {
+                console.log(`[Agent Gamma] Yield sweep skipped: ${result.reason}`);
+            }
+            return result;
+        } catch (error: any) {
+            console.error(`[Agent Gamma] Yield sweep check failed:`, error.message || error);
+            return { swept: false, error: error.message };
+        }
+    }
+
     async executeAutonomousTreasuryPayment(invoice: InvoicePayload) {
         console.log(`[Agent Gamma - The Allocator] Structuring execution for Invoice ${invoice.id}...`);
 
@@ -779,6 +796,13 @@ export async function runOrchestrationPipeline(invoice: InvoicePayload, circleWa
     const auditor = new AgentAuditor(targetWalletId);
     const riskOfficer = new AgentRiskOfficer();
     const allocator = new AgentAllocator(targetWalletId);
+
+    // Run dynamic cross-chain yield sweeper audit & action check autonomously
+    try {
+        await allocator.checkAndExecuteYieldSweep();
+    } catch (yieldErr: any) {
+        console.warn(`[ATO Orchestrator] Automated yield sweep check warning:`, yieldErr.message || yieldErr);
+    }
 
     // Step 1: Cognitive Audit
     const auditResult = await auditor.auditAndReconcile(invoice);
