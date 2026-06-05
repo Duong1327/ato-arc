@@ -81,3 +81,29 @@ model AgentPolicy {
   enforced                       Boolean  @default(true)
   updatedAt                      DateTime @updatedAt
 }
+
+model YieldRate {
+  id                     String   @id @default("rates")
+  baseAave               Float    @default(0.0)
+  baseComp               Float    @default(0.0)
+  arbAave                Float    @default(0.0)
+  arbComp                Float    @default(0.0)
+  arcYield               Float    @default(0.0)
+  minYieldDifferential   Float    @default(1.5) // Minimum differential in percentage (e.g. 1.5%)
+  bridgeSizeCapUSDC      Float    @default(10000.0) // Max USDC allowed to bridge in a single sweep
+  slippageLimitPercent   Float    @default(0.5) // Max slippage allowed (e.g. 0.5%)
+  isSweepEnabled         Boolean  @default(true)
+  updatedAt              DateTime @updatedAt
+}
+
+model BridgeLog {
+  id             String   @id @default(uuid())
+  sourceChain    String   // "Base" or "Arbitrum"
+  destChain      String   // "Arc"
+  amountUSDC     Float
+  yieldDiff      Float
+  status         String   // "PENDING", "COMPLETED", "FAILED"
+  txHash         String?
+  cctpMessage    String?  // CCTP message bytes or attestation request
+  createdAt      DateTime @default(now())
+}
