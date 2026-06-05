@@ -8,12 +8,11 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "./dist",
-    "rootDir": "./src",
     "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": {
       "@prisma/client": ["./node_modules/@prisma/client"]
     }
   },
-  "include": ["src/**/*", "test/**/*", "../scripts/**/*"]
+  "include": ["src/**/*"]
 }

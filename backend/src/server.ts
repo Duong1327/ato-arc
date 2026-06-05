@@ -524,6 +524,130 @@ app.post('/api/agent/policy/toggle-enforcement', async (req: Request, res: Respo
   }
 });
 
+// --- Dynamic Cross-Chain Yield Sweeper Endpoints ---
+import { YieldSweeper } from '../../scripts/yieldSweeper';
+
+let pendingYieldProposal: {
+  minYieldDifferential: number;
+  bridgeSizeCapUSDC: number;
+  slippageLimitPercent: number;
+  approvals: string[];
+} | null = null;
+
+app.get('/api/yield/rates', async (req: Request, res: Response) => {
+  try {
+    await YieldSweeper.updateMarketRates();
+    const config = await YieldSweeper.getOrCreateConfig();
+    res.json(config);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/yield/bridge-logs', async (req: Request, res: Response) => {
+  try {
+    const logs = await prisma.bridgeLog.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 50
+    });
+    res.json(logs);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/yield/proposal', (req: Request, res: Response) => {
+  res.json(pendingYieldProposal);
+});
+
+app.post('/api/yield/proposal', (req: Request, res: Response) => {
+  const { minYieldDifferential, bridgeSizeCapUSDC, slippageLimitPercent, creator } = req.body;
+  if (minYieldDifferential === undefined || bridgeSizeCapUSDC === undefined || slippageLimitPercent === undefined) {
+    return res.status(400).json({ error: 'Missing required yield proposal fields' });
+  }
+
+  pendingYieldProposal = {
+    minYieldDifferential: parseFloat(minYieldDifferential),
+    bridgeSizeCapUSDC: parseFloat(bridgeSizeCapUSDC),
+    slippageLimitPercent: parseFloat(slippageLimitPercent),
+    approvals: [creator || 'Owner 1']
+  };
+
+  res.json({
+    success: true,
+    message: 'Yield thresholds adjustment proposed. Requires multi-sig approval.',
+    proposal: pendingYieldProposal
+  });
+});
+
+app.post('/api/yield/proposal/approve', async (req: Request, res: Response) => {
+  const { approver } = req.body;
+  if (!pendingYieldProposal) {
+    return res.status(400).json({ error: 'No pending yield update proposal exists.' });
+  }
+
+  const activeApprover = approver || 'Owner 2';
+  if (pendingYieldProposal.approvals.includes(activeApprover)) {
+    return res.status(400).json({ error: 'Approver has already signed off on this proposal.' });
+  }
+
+  pendingYieldProposal.approvals.push(activeApprover);
+
+  // If 2 or more approvals, apply the proposal
+  if (pendingYieldProposal.approvals.length >= 2) {
+    try {
+      const updated = await prisma.yieldRate.update({
+        where: { id: 'rates' },
+        data: {
+          minYieldDifferential: pendingYieldProposal.minYieldDifferential,
+          bridgeSizeCapUSDC: pendingYieldProposal.bridgeSizeCapUSDC,
+          slippageLimitPercent: pendingYieldProposal.slippageLimitPercent
+        }
+      });
+
+      pendingYieldProposal = null;
+
+      return res.json({
+        success: true,
+        applied: true,
+        message: 'Yield thresholds approved by multi-sig team and successfully applied to Yield Sweeper.',
+        config: updated
+      });
+    } catch (error: any) {
+      return res.status(500).json({ error: error.message });
+    }
+  }
+
+  res.json({
+    success: true,
+    applied: false,
+    message: `Proposal approved by ${activeApprover}. Current sign-offs: ${pendingYieldProposal.approvals.length}/2`,
+    proposal: pendingYieldProposal
+  });
+});
+
+app.post('/api/yield/toggle', async (req: Request, res: Response) => {
+  try {
+    const current = await YieldSweeper.getOrCreateConfig();
+    const updated = await prisma.yieldRate.update({
+      where: { id: 'rates' },
+      data: { isSweepEnabled: !current.isSweepEnabled }
+    });
+    res.json(updated);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/yield/simulate-tick', async (req: Request, res: Response) => {
+  try {
+    const sweepResult = await YieldSweeper.checkAndSweep();
+    res.json(sweepResult);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Start server if not running tests
 let server: any;
 if (process.env.NODE_ENV !== 'test') {
