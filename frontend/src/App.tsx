@@ -129,7 +129,52 @@ export default function App() {
     }
   }, [vaultAddress]);
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing' | 'webhooks' | 'banking' | 'guardrails' | 'index'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'multisig' | 'sweeper' | 'milestones' | 'compliance' | 'agents' | 'billing' | 'webhooks' | 'banking' | 'guardrails' | 'index' | 'revenue' | 'remote'>('dashboard');
+
+  // --- REVENUE & FEE ALLOCATION ENGINE STATES ---
+  const [feeBasisPoints, setFeeBasisPoints] = useState<number>(0);
+  const [feeBalances, setFeeBalances] = useState<Array<{
+    tokenAddress: string;
+    tokenSymbol: string;
+    accumulatedFees: number;
+    claimedFees: number;
+    updatedAt: string;
+  }>>([]);
+  const [feePayouts, setFeePayouts] = useState<Array<{
+    id: string;
+    stakeholder: string;
+    tokenAddress: string;
+    tokenSymbol: string;
+    amount: number;
+    txHash: string;
+    createdAt: string;
+  }>>([]);
+  const [newFeeSchedule, setNewFeeSchedule] = useState<string>('');
+  const [newStakeholderAddress, setNewStakeholderAddress] = useState<string>('');
+  const [newStakeholderStatus, setNewStakeholderStatus] = useState<boolean>(true);
+  const [payoutToken, setPayoutToken] = useState<string>('0x3600000000000000000000000000000000000000');
+  const [revenuePayoutAmount, setRevenuePayoutAmount] = useState<string>('');
+  const [revenueLoading, setRevenueLoading] = useState<boolean>(false);
+
+  interface RemoteExecutionLog {
+    id: string;
+    sourceChain: string;
+    destChain: string;
+    targetAddress: string;
+    payload: string;
+    amountUSDC: number;
+    nonce: number;
+    status: string;
+    destTxHash?: string;
+    createdAt: string;
+  }
+
+  const [remoteHistory, setRemoteHistory] = useState<RemoteExecutionLog[]>([]);
+  const [remoteDestChain, setRemoteDestChain] = useState<string>('Base');
+  const [remoteTargetAddress, setRemoteTargetAddress] = useState<string>('');
+  const [remotePayload, setRemotePayload] = useState<string>('');
+  const [remoteAmountUSDC, setRemoteAmountUSDC] = useState<string>('');
+  const [remoteLoading, setRemoteLoading] = useState<boolean>(false);
 
   const [passkeyAccount, setPasskeyAccount] = useState<{
     address: string;
@@ -420,6 +465,160 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Simulate drift failed:', err);
+    }
+  };
+
+  const fetchRevenueData = async () => {
+    try {
+      const metricsRes = await fetch('http://localhost:3001/api/revenue/metrics');
+      const metrics = await metricsRes.json();
+      if (metrics.balances) {
+        setFeeBalances(metrics.balances);
+      }
+      if (metrics.feeBasisPoints !== undefined) {
+        setFeeBasisPoints(metrics.feeBasisPoints);
+      }
+
+      const historyRes = await fetch('http://localhost:3001/api/revenue/history');
+      const history = await historyRes.json();
+      setFeePayouts(history);
+    } catch (err) {
+      console.error('Error fetching revenue/fee data:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'revenue') {
+      fetchRevenueData();
+      const interval = setInterval(fetchRevenueData, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab]);
+
+  const fetchRemoteHistory = async () => {
+    try {
+      const res = await fetch('http://localhost:3001/api/remote/history');
+      const data = await res.json();
+      setRemoteHistory(data);
+    } catch (err) {
+      console.error('Error fetching remote execution history:', err);
+    }
+  };
+
+  const handleExecuteRemote = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRemoteLoading(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/remote/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          destChain: remoteDestChain,
+          targetAddress: remoteTargetAddress,
+          payload: remotePayload,
+          amountUSDC: parseFloat(remoteAmountUSDC || '0')
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert('Cross-chain Remote Execution submitted successfully! Tx: ' + data.txHash);
+        setRemoteTargetAddress('');
+        setRemotePayload('');
+        setRemoteAmountUSDC('');
+        fetchRemoteHistory();
+      } else {
+        alert('Error: ' + data.error);
+      }
+    } catch (err: any) {
+      alert('Error triggering remote execution: ' + err.message);
+    } finally {
+      setRemoteLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'remote') {
+      fetchRemoteHistory();
+      const interval = setInterval(fetchRemoteHistory, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab]);
+
+  const handleUpdateFeeSchedule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRevenueLoading(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/revenue/update-schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feeBps: parseInt(newFeeSchedule) })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert('Fee Schedule proposed successfully! Tx: ' + data.txHash);
+        setNewFeeSchedule('');
+        fetchRevenueData();
+      } else {
+        alert('Error: ' + data.error);
+      }
+    } catch (err: any) {
+      alert('Error updating fee schedule: ' + err.message);
+    } finally {
+      setRevenueLoading(false);
+    }
+  };
+
+  const handleRegisterStakeholder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRevenueLoading(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/revenue/register-stakeholder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stakeholder: newStakeholderAddress,
+          status: newStakeholderStatus
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert('Stakeholder status updated successfully! Tx: ' + data.txHash);
+        setNewStakeholderAddress('');
+        fetchRevenueData();
+      } else {
+        alert('Error: ' + data.error);
+      }
+    } catch (err: any) {
+      alert('Error updating stakeholder: ' + err.message);
+    } finally {
+      setRevenueLoading(false);
+    }
+  };
+
+  const handleRequestPayout = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRevenueLoading(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/revenue/payout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tokenAddress: payoutToken,
+          amount: parseFloat(revenuePayoutAmount)
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert('Payout processed successfully! Tx: ' + data.txHash);
+        setRevenuePayoutAmount('');
+        fetchRevenueData();
+      } else {
+        alert('Error: ' + data.error);
+      }
+    } catch (err: any) {
+      alert('Error requesting payout: ' + err.message);
+    } finally {
+      setRevenueLoading(false);
     }
   };
 
@@ -3000,6 +3199,32 @@ export default function App() {
                 <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
               </svg>
               Treasury Index
+            </button>
+
+            <button
+              onClick={() => setActiveTab('revenue')}
+              className={`nav-button ${activeTab === 'revenue' ? 'nav-button-active' : ''}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '0.75rem', opacity: 0.85 }}>
+                <line x1="18" y1="20" x2="18" y2="10" />
+                <line x1="12" y1="20" x2="12" y2="4" />
+                <line x1="6" y1="20" x2="6" y2="14" />
+              </svg>
+              Revenue Analytics
+            </button>
+
+            <button
+              onClick={() => setActiveTab('remote')}
+              className={`nav-button ${activeTab === 'remote' ? 'nav-button-active' : ''}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '0.75rem', opacity: 0.85 }}>
+                <path d="M16 3h5v5" />
+                <path d="M8 3H3v5" />
+                <path d="M12 21a9 9 0 1 0 0-18" />
+                <path d="m21 3-9 9" />
+                <path d="m3 3 9 9" />
+              </svg>
+              Cross-Chain Remote
             </button>
           </div>
 
@@ -6602,6 +6827,449 @@ export default function App() {
                         <tr>
                           <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '1.5rem' }}>
                             No rebalancing swaps recorded yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'revenue' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              
+              {/* Row 1: Header + Dynamic Metrics */}
+              <div className="dashboard-header-row">
+                <div>
+                  <h2 className="dashboard-title">DYNAMIC REVENUE & FEE ALLOCATION</h2>
+                  <p className="dashboard-subtitle">Monitor SaaS commissions, update fee schedules, and execute stakeholder payouts.</p>
+                </div>
+                <div className="status-indicator">
+                  <span className="pulse-green"></span>
+                  <span>Active Fee Engine: <strong>{feeBasisPoints / 100}%</strong></span>
+                </div>
+              </div>
+
+              {/* Metric Cards */}
+              <div className="metric-row">
+                <div className="metric-card glass-panel">
+                  <div className="metric-label">TOTAL ACCUMULATED FEES</div>
+                  <div className="metric-value">
+                    ${feeBalances.reduce((acc, b) => acc + (b.tokenSymbol === 'EURC' ? b.accumulatedFees * 1.08 : b.accumulatedFees), 0).toFixed(2)}
+                  </div>
+                  <div className="metric-subtext">USDC equivalent (EURC at 1.08 rate)</div>
+                </div>
+
+                <div className="metric-card glass-panel">
+                  <div className="metric-label">TOTAL DISTRIBUTED FEES</div>
+                  <div className="metric-value" style={{ color: 'var(--accent-cyan)' }}>
+                    ${feeBalances.reduce((acc, b) => acc + (b.tokenSymbol === 'EURC' ? b.claimedFees * 1.08 : b.claimedFees), 0).toFixed(2)}
+                  </div>
+                  <div className="metric-subtext">Withdrawn by authorized stakeholders</div>
+                </div>
+
+                <div className="metric-card glass-panel">
+                  <div className="metric-label">FEE RATE (BPS)</div>
+                  <div className="metric-value" style={{ color: 'var(--accent-cyan)' }}>
+                    {feeBasisPoints}
+                  </div>
+                  <div className="metric-subtext">SaaS transfer fee in basis points</div>
+                </div>
+              </div>
+
+              {/* Main Section Grid */}
+              <div className="dashboard-grid-2col">
+                
+                {/* Left: Token Balance breakdown */}
+                <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', marginBottom: '1rem', letterSpacing: '0.05em' }}>
+                    ACCUMULATED FEES BY TOKEN
+                  </h3>
+                  
+                  <div className="table-container">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Token</th>
+                          <th>Contract Address</th>
+                          <th>Accumulated Balance</th>
+                          <th>Total Claimed</th>
+                          <th>Last Updated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {feeBalances.map((b) => (
+                          <tr key={b.tokenAddress}>
+                            <td style={{ fontWeight: 'bold', color: '#fff' }}>{b.tokenSymbol}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}>
+                              {b.tokenAddress.substring(0, 10)}...{b.tokenAddress.slice(-8)}
+                            </td>
+                            <td style={{ color: 'var(--accent-cyan)', fontWeight: 'bold' }}>
+                              {b.accumulatedFees.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
+                            </td>
+                            <td>{b.claimedFees.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                              {new Date(b.updatedAt).toLocaleTimeString()}
+                            </td>
+                          </tr>
+                        ))}
+                        {feeBalances.length === 0 && (
+                          <tr>
+                            <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                              No fee accounts initialized. Perform transactions to trigger collection.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Right: Settings and Admin Overrides */}
+                <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', letterSpacing: '0.05em' }}>
+                    FEE ENGINE SETTINGS & CONTROLS
+                  </h3>
+
+                  {/* Update Fee Schedule Form */}
+                  <form onSubmit={handleUpdateFeeSchedule} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Adjust Fee Basis Points (Max 1000 bps / 10%)</label>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <input
+                        type="number"
+                        placeholder="Basis points (e.g. 50 for 0.5%)"
+                        value={newFeeSchedule}
+                        onChange={(e) => setNewFeeSchedule(e.target.value)}
+                        className="address-input"
+                        style={{ flex: 1, margin: 0, padding: '0.4rem' }}
+                      />
+                      <button
+                        type="submit"
+                        disabled={revenueLoading}
+                        className="action-button-primary"
+                        style={{ fontSize: '0.7rem', padding: '0.4rem 1rem' }}
+                      >
+                        Set Fee Rate
+                      </button>
+                    </div>
+                  </form>
+
+                  <div className="divider-subtle" style={{ margin: 0 }}></div>
+
+                  {/* Register Stakeholder Form */}
+                  <form onSubmit={handleRegisterStakeholder} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Configure Stakeholder Permission</label>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <input
+                        type="text"
+                        placeholder="Stakeholder wallet address"
+                        value={newStakeholderAddress}
+                        onChange={(e) => setNewStakeholderAddress(e.target.value)}
+                        className="address-input"
+                        style={{ flex: 1, margin: 0, padding: '0.4rem' }}
+                      />
+                      <select
+                        value={newStakeholderStatus ? 'true' : 'false'}
+                        onChange={(e) => setNewStakeholderStatus(e.target.value === 'true')}
+                        className="currency-select"
+                        style={{ margin: 0, padding: '0.4rem' }}
+                      >
+                        <option value="true">Authorize</option>
+                        <option value="false">Revoke</option>
+                      </select>
+                      <button
+                        type="submit"
+                        disabled={revenueLoading}
+                        className="action-button-primary"
+                        style={{ fontSize: '0.7rem', padding: '0.4rem 1rem' }}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </form>
+
+                  <div className="divider-subtle" style={{ margin: 0 }}></div>
+
+                  {/* Claim/Request Payout Form */}
+                  <form onSubmit={handleRequestPayout} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Withdraw Payout (Claim Fees)</label>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <select
+                        value={payoutToken}
+                        onChange={(e) => setPayoutToken(e.target.value)}
+                        className="currency-select"
+                        style={{ margin: 0, padding: '0.4rem' }}
+                      >
+                        <option value="0x3600000000000000000000000000000000000000">USDC (ERC-20)</option>
+                        <option value="0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a">EURC (ERC-20)</option>
+                        <option value="0x0000000000000000000000000000000000000000">Arc USDC (Native Gas)</option>
+                      </select>
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="Amount"
+                        value={revenuePayoutAmount}
+                        onChange={(e) => setRevenuePayoutAmount(e.target.value)}
+                        className="address-input"
+                        style={{ flex: 1, margin: 0, padding: '0.4rem' }}
+                      />
+                      <button
+                        type="submit"
+                        disabled={revenueLoading}
+                        className="action-button-primary"
+                        style={{ fontSize: '0.7rem', padding: '0.4rem 1rem' }}
+                      >
+                        Claim Payout
+                      </button>
+                    </div>
+                  </form>
+
+                </div>
+
+              </div>
+
+              {/* Payout History Logs */}
+              <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', marginBottom: '1rem', letterSpacing: '0.05em' }}>
+                  HISTORICAL STAKEHOLDER PAYOUTS
+                </h3>
+                
+                <div className="table-container" style={{ maxHeight: '350px', overflowY: 'auto' }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Stakeholder</th>
+                        <th>Token</th>
+                        <th>Amount Paid</th>
+                        <th>Transaction Hash</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {feePayouts.map((log) => (
+                        <tr key={log.id}>
+                          <td>{new Date(log.createdAt).toLocaleString()}</td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}>
+                            {log.stakeholder}
+                          </td>
+                          <td style={{ fontWeight: 'bold', color: '#fff' }}>
+                            {log.tokenSymbol}
+                          </td>
+                          <td style={{ color: 'var(--accent-cyan)', fontWeight: 'bold' }}>
+                            {log.amount.toLocaleString()}
+                          </td>
+                          <td>
+                            <a 
+                              href={`https://testnet.arcscan.app/tx/${log.txHash}`} 
+                              target="_blank" 
+                              rel="noreferrer" 
+                              style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}
+                            >
+                              {log.txHash.substring(0, 10)}...{log.txHash.slice(-8)}
+                            </a>
+                          </td>
+                        </tr>
+                      ))}
+                      {feePayouts.length === 0 && (
+                        <tr>
+                          <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '1.5rem' }}>
+                            No stakeholder payouts recorded yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+          )}
+
+          {activeTab === 'remote' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              
+              {/* Header */}
+              <div className="dashboard-header-row">
+                <div>
+                  <h2 className="dashboard-title">CROSS-CHAIN REMOTE EXECUTION LAYER</h2>
+                  <p className="dashboard-subtitle">Trigger remote contract actions and orchestrate CCTP messaging across EVM target chains.</p>
+                </div>
+                <div className="status-indicator">
+                  <span className="pulse-green"></span>
+                  <span>CCTP Relayer: <strong>ONLINE</strong></span>
+                </div>
+              </div>
+
+              {/* Action Form */}
+              <div className="grid-2col" style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '1.5rem' }}>
+                <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', letterSpacing: '0.05em', margin: 0 }}>
+                    DISPATCH CROSS-CHAIN COMMAND
+                  </h3>
+                  <div className="divider-subtle" style={{ margin: 0 }}></div>
+
+                  <form onSubmit={handleExecuteRemote} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    <div style={{ display: 'flex', gap: '1rem' }}>
+                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                        <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Destination Chain</label>
+                        <select
+                          value={remoteDestChain}
+                          onChange={(e) => setRemoteDestChain(e.target.value)}
+                          className="currency-select"
+                          style={{ margin: 0, width: '100%' }}
+                        >
+                          <option value="Base">Base Mainnet</option>
+                          <option value="Arbitrum">Arbitrum One</option>
+                          <option value="Optimism">Optimism</option>
+                          <option value="Ethereum">Ethereum L1</option>
+                        </select>
+                      </div>
+
+                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                        <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Bridge Amount (USDC)</label>
+                        <input
+                          type="number"
+                          step="any"
+                          placeholder="0.00"
+                          value={remoteAmountUSDC}
+                          onChange={(e) => setRemoteAmountUSDC(e.target.value)}
+                          className="address-input"
+                          style={{ margin: 0 }}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                      <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Target Contract Address</label>
+                      <input
+                        type="text"
+                        placeholder="0x..."
+                        value={remoteTargetAddress}
+                        onChange={(e) => setRemoteTargetAddress(e.target.value)}
+                        className="address-input"
+                        style={{ margin: 0 }}
+                      />
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                      <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Call Payload (Hex Data)</label>
+                      <textarea
+                        rows={3}
+                        placeholder="0xa9059cbb000000000000000000000000..."
+                        value={remotePayload}
+                        onChange={(e) => setRemotePayload(e.target.value)}
+                        className="address-input"
+                        style={{ margin: 0, fontFamily: 'var(--font-mono)', fontSize: '0.7rem', resize: 'vertical' }}
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={remoteLoading}
+                      className="action-button-primary"
+                      style={{ width: '100%', padding: '0.6rem 1rem' }}
+                    >
+                      {remoteLoading ? 'Dispatching Payload...' : 'Broadcast Cross-Chain Call'}
+                    </button>
+                  </form>
+                </div>
+
+                <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', letterSpacing: '0.05em', margin: 0 }}>
+                    INTEGRATION METRICS & SPECS
+                  </h3>
+                  <div className="divider-subtle" style={{ margin: 0 }}></div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', fontSize: '0.75rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Layer 2 Settlement</span>
+                      <span style={{ color: '#fff', fontWeight: 'bold' }}>~ 2.5 seconds</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>CCTP Circle Token Messenger</span>
+                      <span style={{ color: 'var(--accent-cyan)' }}>Active</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Remote Executor Code</span>
+                      <span style={{ color: '#fff', fontFamily: 'var(--font-mono)' }}>RemoteExecutor.sol</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Signature Model</span>
+                      <span style={{ color: 'var(--accent-purple)', fontWeight: 'bold' }}>EIP-712 Typed Struct</span>
+                    </div>
+                    <div className="divider-subtle" style={{ margin: '0.2rem 0' }}></div>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.68rem', lineHeight: '1.4', margin: 0 }}>
+                      The Remote Execution Layer signs commands cryptographically off-chain. Target chains verify the signature before running transactions to secure execution against unauthorized payloads.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Execution History */}
+              <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                <h3 style={{ fontSize: '0.9rem', fontWeight: 'bold', color: '#fff', marginBottom: '1rem', letterSpacing: '0.05em' }}>
+                  CROSS-CHAIN TRANSACTION HISTORY
+                </h3>
+                
+                <div className="table-container" style={{ maxHeight: '350px', overflowY: 'auto' }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Path</th>
+                        <th>Nonce</th>
+                        <th>Amount</th>
+                        <th>Target Address</th>
+                        <th>Status</th>
+                        <th>Destination Hash</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {remoteHistory.map((log) => (
+                        <tr key={log.id}>
+                          <td>{new Date(log.createdAt).toLocaleString()}</td>
+                          <td style={{ fontWeight: 'bold', color: '#fff' }}>
+                            {log.sourceChain} ➜ {log.destChain}
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem' }}>
+                            {log.nonce}
+                          </td>
+                          <td style={{ color: 'var(--accent-cyan)', fontWeight: 'bold' }}>
+                            ${log.amountUSDC.toLocaleString()}
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}>
+                            {log.targetAddress}
+                          </td>
+                          <td>
+                            <span className={`status-badge ${
+                              log.status === 'EXECUTED' ? 'status-badge-success' :
+                              log.status === 'PENDING' ? 'status-badge-pending' : 'status-badge-failed'
+                            }`}>
+                              {log.status}
+                            </span>
+                          </td>
+                          <td>
+                            {log.destTxHash ? (
+                              <a 
+                                href={`https://testnet.arcscan.app/tx/${log.destTxHash}`} 
+                                target="_blank" 
+                                rel="noreferrer" 
+                                style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}
+                              >
+                                {log.destTxHash.substring(0, 10)}...{log.destTxHash.slice(-8)}
+                              </a>
+                            ) : (
+                              <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem' }}>N/A</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                      {remoteHistory.length === 0 && (
+                        <tr>
+                          <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '1.5rem' }}>
+                            No remote execution commands recorded yet.
                           </td>
                         </tr>
                       )}
