@@ -3,6 +3,10 @@
 
 generator client {
   provider = "prisma-client-js"
+}
+
+generator client_root {
+  provider = "prisma-client-js"
   output   = "../../node_modules/.prisma/client"
 }
 
@@ -106,4 +110,18 @@ model BridgeLog {
   txHash         String?
   cctpMessage    String?  // CCTP message bytes or attestation request
   createdAt      DateTime @default(now())
+}
+
+model FactoringOffer {
+  milestoneId  Int      @id
+  supplier     String
+  totalAmount  Float
+  discountRate Float    // in bps, e.g., 500 for 5%
+  netPayout    Float
+  purchaser    String?
+  isSold       Boolean  @default(false)
+  isApproved   Boolean  @default(false)
+  txHash       String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }

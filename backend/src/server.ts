@@ -648,6 +648,100 @@ app.post('/api/yield/simulate-tick', async (req: Request, res: Response) => {
   }
 });
 
+// --- INVOICE FACTORING FACILITY ENDPOINTS ---
+
+app.get('/api/factoring', async (req: Request, res: Response) => {
+  try {
+    const offers = await prisma.factoringOffer.findMany({
+      orderBy: { milestoneId: 'desc' }
+    });
+    res.json(offers);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/factoring/propose', async (req: Request, res: Response) => {
+  const { milestoneId, supplier, totalAmount, discountRate, netPayout } = req.body;
+  if (!milestoneId || !supplier || totalAmount === undefined || discountRate === undefined || netPayout === undefined) {
+    return res.status(400).json({ error: 'Missing required factoring proposal fields' });
+  }
+  try {
+    const offer = await prisma.factoringOffer.upsert({
+      where: { milestoneId: parseInt(milestoneId) },
+      update: {
+        supplier,
+        totalAmount: parseFloat(totalAmount),
+        discountRate: parseFloat(discountRate),
+        netPayout: parseFloat(netPayout),
+        isSold: false,
+        isApproved: false
+      },
+      create: {
+        milestoneId: parseInt(milestoneId),
+        supplier,
+        totalAmount: parseFloat(totalAmount),
+        discountRate: parseFloat(discountRate),
+        netPayout: parseFloat(netPayout),
+        isSold: false,
+        isApproved: false
+      }
+    });
+    res.json(offer);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/factoring/evaluate', async (req: Request, res: Response) => {
+  const { milestoneId, approved } = req.body;
+  if (milestoneId === undefined || approved === undefined) {
+    return res.status(400).json({ error: 'Missing milestoneId or approved status' });
+  }
+  try {
+    const offer = await prisma.factoringOffer.update({
+      where: { milestoneId: parseInt(milestoneId) },
+      data: { isApproved: approved }
+    });
+    res.json(offer);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/factoring/buy', async (req: Request, res: Response) => {
+  const { milestoneId, purchaser, txHash } = req.body;
+  if (!milestoneId || !purchaser || !txHash) {
+    return res.status(400).json({ error: 'Missing milestoneId, purchaser, or txHash' });
+  }
+  try {
+    const offer = await prisma.factoringOffer.update({
+      where: { milestoneId: parseInt(milestoneId) },
+      data: {
+        purchaser,
+        isSold: true,
+        txHash
+      }
+    });
+
+    // Reconcile associated milestone invoice if exists
+    const invoice = await prisma.invoice.findFirst({
+      where: { milestoneId: parseInt(milestoneId) }
+    });
+
+    if (invoice) {
+      await prisma.invoice.update({
+        where: { id: invoice.id },
+        data: { status: 'COMPLIANCE_APPROVED' }
+      });
+    }
+
+    res.json(offer);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Start server if not running tests
 let server: any;
 if (process.env.NODE_ENV !== 'test') {
