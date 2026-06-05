@@ -320,6 +320,62 @@ export const ATO_VAULT_ABI = [
   },
   {
     inputs: [
+      { internalType: 'address', name: 'token', type: 'address' }
+    ],
+    name: 'getTreasuryBalances',
+    outputs: [
+      { internalType: 'uint256', name: 'erc20Balance', type: 'uint256' },
+      { internalType: 'uint256', name: 'nativeGasBalance', type: 'uint256' }
+    ],
+    stateMutability: 'view',
+    type: 'function'
+  },
+  {
+    inputs: [],
+    name: 'stableFXAddress',
+    outputs: [
+      { internalType: 'address', name: '', type: 'address' }
+    ],
+    stateMutability: 'view',
+    type: 'function'
+  },
+  {
+    inputs: [
+      { internalType: 'address', name: 'token', type: 'address' }
+    ],
+    name: 'isTokenRegistered',
+    outputs: [
+      { internalType: 'bool', name: '', type: 'bool' }
+    ],
+    stateMutability: 'view',
+    type: 'function'
+  },
+  {
+    inputs: [],
+    name: 'getRegisteredTokens',
+    outputs: [
+      { internalType: 'address[]', name: '', type: 'address[]' }
+    ],
+    stateMutability: 'view',
+    type: 'function'
+  },
+  {
+    inputs: [
+      { internalType: 'address', name: 'sellToken', type: 'address' },
+      { internalType: 'address', name: 'buyToken', type: 'address' },
+      { internalType: 'uint256', name: 'sellAmount', type: 'uint256' },
+      { internalType: 'uint256', name: 'minBuyAmount', type: 'uint256' },
+      { internalType: 'address', name: 'recipient', type: 'address' }
+    ],
+    name: 'executeFxTrade',
+    outputs: [
+      { internalType: 'uint256', name: 'buyAmountBought', type: 'uint256' }
+    ],
+    stateMutability: 'nonpayable',
+    type: 'function'
+  },
+  {
+    inputs: [
       { internalType: 'uint256', name: '', type: 'uint256' },
       { internalType: 'address', name: '', type: 'address' }
     ],
